@@ -163,6 +163,7 @@ export interface Tower {
   kills: number;
   fireFlash: number;
   baseTower?: boolean;
+  corroded?: boolean;
 }
 
 export interface StatContext {

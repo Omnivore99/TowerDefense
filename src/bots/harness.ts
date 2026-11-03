@@ -13,6 +13,7 @@ export function runSkill(skill: Skill, mode: ModeId, seeds: number[], onProgress
   const acc = Array.from({ length: BOARDS }, (_, i) => ({ board: i + 1, clears: 0, hp: 0, dangerT: 0, waveT: 0, runs: 0 }));
   for (const seed of seeds) {
     const g = new Game(seed, mode, { tutorial: false });
+    g.undoEnabled = false;
     const bot = new Bot(g, skill, seed ^ 0xb07);
     let steps = 0;
     let board = 1;

@@ -30,7 +30,7 @@ const SUIT_RANGE: Record<Suit, [number, number]> = {
   clubs: [0x7cf0c0, 0x15a58f],
   spades: [0xa6b4ff, 0x7a3fe0],
 };
-const TIER: Record<Size, number> = { small: 0, medium: 0.4, large: 0.75, giant: 0.9, boss: 1 };
+const TIER: Record<Size, number> = { mite: 0.1, small: 0, medium: 0.4, large: 0.75, giant: 0.9, champion: 0.95, boss: 1 };
 
 export function mix(a: number, b: number, t: number): number {
   const ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;

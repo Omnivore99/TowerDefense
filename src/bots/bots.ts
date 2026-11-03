@@ -1,5 +1,5 @@
 // Headless bot players for the balance harness.
-import { BASE_SQUARES, BUILDINGS, TOWERS, type BuildingId } from '../balance';
+import { BASE_SQUARES, BUILDINGS, GRID_H, GRID_W, TOWERS, type BuildingId } from '../balance';
 import { canBuild } from '../sim/base';
 import { type Game, type Preview, type Source } from '../sim/game';
 import { cellIdx, inGrid, routeAt } from '../sim/map';
@@ -37,7 +37,7 @@ export class Bot {
   /** Call once per sim step. */
   act() {
     const g = this.game;
-    if (g.phase === 'reveal') { if (g.revealPaused) g.continueReveal(); return; }
+    if (g.phase === 'reveal') return;
     if (g.phase === 'cleared') { g.enterBase(); return; }
     if (g.phase === 'base') { this.shop(); g.nextBoard(); return; }
     if (g.phase !== 'calm' && g.phase !== 'wave') return;
@@ -71,8 +71,8 @@ export class Bot {
         samples.push({ x: p.x, y: p.y, w: this.skill === 'expert' ? 0.6 + late : 1 });
       }
     const spots: Spot[] = [];
-    for (let y = 2; y < 62; y += 3)
-      for (let x = 2; x < 102; x += 3) {
+    for (let y = 2; y < GRID_H - 2; y += 3)
+      for (let x = 2; x < GRID_W - 2; x += 3) {
         if (g.board.isRoad(x, y) || g.board.isCoreCell(x, y) || g.board.ore[cellIdx(x, y)]) continue;
         let near = false;
         for (let dy = -2; dy <= 2 && !near; dy++) for (let dx = -2; dx <= 2; dx++) if (inGrid(x + dx, y + dy) && g.board.isRoad(x + dx, y + dy)) { near = true; break; }

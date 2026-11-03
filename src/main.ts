@@ -41,15 +41,18 @@ async function boot() {
   const saveNow = () => {
     if (!running) return;
     for (const t of game.discovered) if (!meta.discovered.includes(t)) meta.discovered.push(t);
+    meta.elements = [...new Set([...(meta.elements ?? []), ...game.discoveredElements])];
     saveMeta(meta);
     if (game.phase === 'victory') { clearRun(); return; }
-    saveRun({ seed: game.seed, mode: game.mode, board: game.boardNo, base: game.baseSnapshot, discovered: [...game.discovered], savedAt: Date.now() });
+    const snap = game.boardSnapshot;
+    saveRun({ v: 2, seed: game.seed, mode: game.mode, board: snap.boardNo, snapshot: snap, discovered: [...game.discovered], elements: [...game.discoveredElements], savedAt: Date.now() });
   };
 
   const startGame = (g: Game) => {
     game = g;
     (window as unknown as { __std: unknown }).__std = { game, ui, renderer, Bot, Game, start: startGame };
     for (const t of meta.discovered) game.discovered.add(t);
+    for (const el of meta.elements ?? []) game.discoveredElements.add(el);
     running = true;
     acc = 0;
     ui.setGame(g);
@@ -100,8 +103,9 @@ async function boot() {
     const cont = title.querySelector('#cont') as HTMLButtonElement | null;
     if (cont && saved) cont.onclick = () => {
       audio.start();
-      const g = new Game(saved.seed, saved.mode, { tutorial: false, base: saved.base, board: saved.board });
+      const g = new Game(saved.seed, saved.mode, { tutorial: false, snapshot: saved.snapshot });
       for (const t of saved.discovered) g.discovered.add(t);
+      for (const el of saved.elements) g.discoveredElements.add(el);
       startGame(g);
     };
     title.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((b) => (b.onclick = () => {
@@ -140,6 +144,7 @@ async function boot() {
       }
     }
     if (game.phase !== lastPhase) { lastPhase = game.phase; }
+    if (running && game.phase === 'reveal' && Math.random() < 0.5) audio.crackle();
     renderer.draw(game, acc / DT, dt);
     if (running) ui.update(dt);
     audio.tick();

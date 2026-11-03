@@ -2,20 +2,20 @@
 // Render, audio and UI read state and drain `events`; bots drive it headless.
 import {
   ABILITIES, ARCH, BASE_INTEGRITY, BASE_SQUARES, BOARDS, BOARD_START_PIECES, BUILDINGS, BUILDING_FX,
-  BURST_GAP, CALM_PIECES, COMBAT, COMBO, EARLY_CALL_BONUS, EARLY_CALL_WINDOW, GLYPHS, GRID_H, GRID_W,
-  MACRO, MAX_GROUND_PIECES, MAX_STORIES, MAY_SLOTS, PHI, RESONANCE, REVEAL, ROAD_PIECES_PER_MACRO,
-  SHAPE, SIM_HZ, SIZES, SUIT_MULT, TOWERS, WAVES_PER_BOARD, WAVE_PIECE_INTERVAL,
-  type Ability, type Archetype, type BuildingId, type ModeId, type Size, type TowerType,
+  BURST_GAP, CALM_PIECES, CHAMPION, COMBAT, COMBO, EARLY_CALL_BONUS, EARLY_CALL_WINDOW, GLYPHS, GRID_H, GRID_W,
+  LANE_SPREAD, MACRO, MAX_GROUND_PIECES, MAX_STORIES, MAY_SLOTS, PACK_SPACING, RESONANCE, REVEAL, ROAD_PIECES_PER_MACRO,
+  SHAPE, SIM_HZ, SIZES, SUIT_MULT, TIER_ESSENCE, TIER_SCALE, TOWERS, UNDO_SECONDS, WAVES_PER_BOARD, WAVE_PIECE_INTERVAL,
+  type Ability, type Archetype, type BuildingId, type Group, type ModeId, type Size, type TowerType,
 } from '../balance';
 import { type BaseState, buildingMult, canBuild, goldenBase, hasBuilding, newBase } from './base';
-import { Board, CORE_PT, cellIdx, edgeKey, inGrid, makeRoute, mid, routeAt, type Pt, type Route } from './map';
+import { Board, type BoardData, CORE_PT, cellIdx, inGrid, makeRoute, mid, routeAt, type PathState, type Pt, type Route } from './map';
 import {
   type Cell, type Family, type Orient, type Piece, type PieceColor, PieceStream, RARE_GLYPHS, COMMON_GLYPHS,
   isCap, placedCells,
 } from './pieces';
 import { Rng, subSeed } from './rng';
 import { type PlacedPiece, type Tower, type TowerStats, analyseShape, bbox, computeStats, recipe, towerFamilies } from './towers';
-import { type Suit, type WaveSpec, SUITS, dominantSuit, makeWave } from './waves';
+import { type EnemySpec, type Suit, type WaveSpec, SUITS, dominantSuit, hpWeight, makeWave } from './waves';
 
 export type Phase = 'reveal' | 'calm' | 'wave' | 'cleared' | 'base' | 'lost' | 'victory';
 
@@ -27,10 +27,15 @@ export interface Enemy {
   suit: Suit;
   arch: Archetype;
   ability: Ability | null;
+  element: string;
+  group: Group;
+  tier: number;
   golden: boolean;
   boss: boolean;
+  champion: boolean;
   gen: number;
-  hp: number; maxHp: number; shield: number;
+  hp: number; maxHp: number; shield: number; shieldMax: number;
+  lane: number; sdir: number; lastHitT: number; summonT: number;
   route: Route;
   overland: boolean;
   d: number;
@@ -87,7 +92,14 @@ export type GameEvent =
   | { t: 'bolt'; x1: number; y1: number; x2: number; y2: number; miss: boolean }
   | { t: 'hit'; x: number; y: number; amount: number; crit: boolean }
   | { t: 'explode'; x: number; y: number; r: number; color: PieceColor | null }
-  | { t: 'kill'; x: number; y: number; size: Size; suit: Suit; arch: Archetype; split: boolean; essence: number }
+  | { t: 'kill'; x: number; y: number; size: Size; suit: Suit; arch: Archetype; split: boolean; essence: number; group: Group; tier: number; champion: boolean }
+  | { t: 'undo'; pieceId: number; cells: Cell[]; color: PieceColor }
+  | { t: 'strike'; path: PathState; destroys: number }
+  | { t: 'destroyed'; x: number; y: number; cells: Cell[] }
+  | { t: 'summon'; x: number; y: number; n: number }
+  | { t: 'champion'; x: number; y: number; boss: boolean }
+  | { t: 'loot'; x: number; y: number; essence: number; ore: number; golden: boolean }
+  | { t: 'discover'; element: string; group: Group }
   | { t: 'combo'; n: number; x: number; y: number }
   | { t: 'leak'; dmg: number; x: number; y: number }
   | { t: 'mine'; x: number; y: number }
@@ -97,15 +109,12 @@ export type GameEvent =
   | { t: 'phase'; phase: Phase }
   | { t: 'waveStart'; index: number }
   | { t: 'waveEnd'; index: number }
-  | { t: 'seal'; a: number; b: number }
-  | { t: 'sealReject'; a: number; b: number }
   | { t: 'reject'; reason: string }
   | { t: 'smite'; x: number; y: number; r: number }
   | { t: 'early' }
   | { t: 'recycle'; essence: number }
   | { t: 'build'; square: number; id: BuildingId }
   | { t: 'barrierBreak'; x: number; y: number }
-  | { t: 'revealPause' }
   | { t: 'revealDone' }
   | { t: 'ore'; amount: number };
 
@@ -137,6 +146,35 @@ export interface BoardMetrics {
 
 export interface Settings { volume: number; reducedMotion: boolean; showRanges: boolean; speed: number }
 
+/** Everything that persists between boards: what a save, a retry and a new board start from. */
+export interface RunSnapshot {
+  boardNo: number;
+  base: BaseState;
+  board: BoardData | null;
+  towers: { id: number; pieces: PlacedPiece[]; height: number; kills: number }[];
+  roadPieces: { id: number; kind: 'barrier' | 'mine'; piece: Piece; cells: Cell[]; macro: number; mines: boolean[] }[];
+  harvesters: Harvester[];
+  must: Piece[];
+  may: (Piece | null)[];
+  hold: Piece | null;
+  nextId: number;
+}
+
+interface UndoState {
+  towers: Tower[];
+  towerAt: Int32Array;
+  objAt: Int32Array;
+  roadPieces: RoadPiece[];
+  harvesters: Harvester[];
+  must: Piece[];
+  may: (Piece | null)[];
+  hold: Piece | null;
+  holdLocked: boolean;
+  placed: number;
+  tutorial: { step: number; text: string } | null;
+  discovered: TowerType[];
+}
+
 const DT = 1 / SIM_HZ;
 const SUIT_WEAK: Record<Suit, PieceColor> = { hearts: 'green', clubs: 'red', diamonds: 'blue', spades: 'gold' };
 const SUIT_RESIST: Record<Suit, PieceColor> = { hearts: 'red', clubs: 'green', diamonds: 'gold', spades: 'blue' };
@@ -150,11 +188,19 @@ export class Game {
   base: BaseState;
   baseSnapshot: BaseState;
   board!: Board;
+  private boardMade = false;
   time = 0;
   phaseT = 0;
   tutorial: { step: number; text: string } | null = null;
   tutorialEnabled: boolean;
   discovered = new Set<TowerType>();
+  discoveredElements = new Set<string>();
+  /** Undo: the last placement can be taken back with Esc for a couple of seconds. */
+  undoEnabled = true;
+  lastPlace: { t: number; pieceId: number; cells: Cell[]; color: PieceColor; state: UndoState } | null = null;
+  /** State at the start of the current board (saves and retries restore it). */
+  boardSnapshot: RunSnapshot;
+  strikeDestroys: number[] = [];
 
   // pieces
   stream!: PieceStream;
@@ -167,9 +213,6 @@ export class Game {
 
   // reveal
   revealStep = 0;
-  revealPauses: number[] = [];
-  revealPaused = false;
-  sealsLeft = 0;
 
   // entities
   towers: Tower[] = [];
@@ -200,36 +243,107 @@ export class Game {
   combat: Rng;
   waveRng: Rng;
 
-  constructor(seed: number, mode: ModeId = 'normal', opts: { tutorial?: boolean; base?: BaseState; board?: number } = {}) {
+  constructor(seed: number, mode: ModeId = 'normal', opts: { tutorial?: boolean; snapshot?: RunSnapshot } = {}) {
     this.seed = seed >>> 0;
     this.mode = mode;
-    this.base = opts.base ?? newBase();
-    this.baseSnapshot = structuredClone(this.base);
+    this.base = newBase();
     this.tutorialEnabled = opts.tutorial ?? true;
     this.combat = new Rng(subSeed(seed, 909));
     this.waveRng = new Rng(subSeed(seed, 808));
-    this.startBoard(opts.board ?? 1);
+    if (opts.snapshot) this.restore(opts.snapshot);
+    this.baseSnapshot = structuredClone(this.base);
+    this.boardSnapshot = this.snapshot();
+    this.startBoard(opts.snapshot?.boardNo ?? 1);
+  }
+
+  // ================================================================ snapshots
+  snapshot(): RunSnapshot {
+    return structuredClone({
+      boardNo: this.boardNo,
+      base: this.base,
+      board: this.boardMade ? this.board.serialize() : null,
+      towers: this.towers.filter((t) => !t.baseTower).map((t) => ({ id: t.id, pieces: t.pieces, height: t.height, kills: t.kills })),
+      roadPieces: this.roadPieces.map((r) => ({ id: r.id, kind: r.kind, piece: r.piece, cells: r.cells, macro: r.macro, mines: r.mines })),
+      harvesters: this.harvesters,
+      must: this.must,
+      may: this.may,
+      hold: this.hold,
+      nextId: this.nextId,
+    });
+  }
+
+  restore(snap: RunSnapshot) {
+    const s = structuredClone(snap);
+    this.boardNo = s.boardNo;
+    this.base = s.base;
+    this.boardMade = !!s.board;
+    if (s.board) this.board = new Board(this.seed, s.board);
+    this.nextId = Math.max(this.nextId, s.nextId);
+    this.towerAt.fill(0);
+    this.objAt.fill(0);
+    this.towers = s.towers.map((o) => {
+      const t = this.blankTower(o.id, o.height);
+      t.pieces = o.pieces;
+      t.kills = o.kills;
+      this.rebuildTower(t);
+      if (t.type) { t.active = true; t.activateT = 99; }
+      for (const c of t.layers[0]) this.towerAt[cellIdx(c[0], c[1])] = t.id;
+      return t;
+    });
+    this.roadPieces = s.roadPieces.map((r) => ({ ...r, hp: 0, maxHp: 0, entry: new Map() }));
+    for (const r of this.roadPieces) for (const [x, y] of r.cells) this.objAt[cellIdx(x, y)] = r.id;
+    this.harvesters = s.harvesters;
+    for (const h of this.harvesters) for (const [x, y] of h.cells) this.objAt[cellIdx(x, y)] = h.id;
+    this.must = s.must;
+    this.may = s.may;
+    this.hold = s.hold;
+    this.recomputeEntries();
+  }
+
+  private blankTower(id: number, height: number): Tower {
+    return {
+      id, pieces: [], layers: [], height, type: null, hint: '', active: false, activateT: 0, cx: 0, cy: 0,
+      stats: null, cooldown: 0, targetId: 0, angle: -Math.PI / 2, rampTarget: 0, rampT: 0, shots: 0, kills: 0, fireFlash: 0,
+    };
+  }
+
+  /** Where barriers and mines sit along each route (routes change when a road is added). */
+  private recomputeEntries() {
+    if (!this.boardMade) return;
+    for (const rp of this.roadPieces) {
+      rp.entry = new Map();
+      for (const r of this.board.routes) {
+        for (let d = 0; d < r.length; d += 0.25) {
+          const p = routeAt(r, d);
+          if (rp.cells.some(([x, y]) => Math.floor(p.x) === x && Math.floor(p.y) === y)) { rp.entry.set(r, d); break; }
+        }
+      }
+    }
   }
 
   // ================================================================ board flow
   startBoard(b: number) {
     this.boardNo = b;
-    this.board = new Board(this.seed, b);
-    this.stream = new PieceStream(subSeed(this.seed, 707, b), b * 100000);
+    this.stream = new PieceStream(subSeed(this.seed, 707, b, this.attempt), b * 100000 + this.attempt * 10000);
     this.combat = new Rng(subSeed(this.seed, 909, b, this.attempt));
     this.waveRng = new Rng(subSeed(this.seed, 808, b));
-    this.towers = [];
-    this.towerAt.fill(0);
-    this.objAt.fill(0);
-    this.roadPieces = [];
-    this.harvesters = [];
+    // The map persists. Board 1 makes it; every later board strikes in one new road.
+    this.strikeDestroys = [];
+    if (!this.boardMade) { this.board = new Board(this.seed); this.boardMade = true; }
+    else {
+      const plan = this.board.planRoad(b, (c) => this.objAt[c] !== 0 || this.towerAt[c] !== 0);
+      this.board.setPending(plan.path);
+      this.strikeDestroys = plan.destroys;
+    }
     this.enemies = [];
     this.projectiles = [];
     this.puddles = [];
     this.tanks = [];
-    this.must = [];
-    this.may = new Array(MAY_SLOTS + (hasBuilding(this.base, 'beacon') ? 1 : 0)).fill(null);
-    this.hold = null;
+    this.lastPlace = null;
+    const slots = MAY_SLOTS + (hasBuilding(this.base, 'beacon') ? 1 : 0);
+    const kept = this.may.filter((p): p is Piece => !!p);
+    this.may = new Array(slots).fill(null);
+    for (const p of kept) this.addPiece(p, true);
     this.holdLocked = false;
     this.waveIndex = 0;
     this.wave = null;
@@ -238,11 +352,6 @@ export class Game {
     this.buffer = Math.round(BUILDING_FX.blastDoor * buildingMult(this.base, 'blastDoor'));
     this.combo = { n: 0, last: -99, peak: 0 };
     this.revealStep = 0;
-    const total = this.board.revealTotal();
-    this.revealPauses = [];
-    for (let k = 1; k <= REVEAL.pauses; k++) this.revealPauses.push(Math.max(2, Math.floor((total * k) / (REVEAL.pauses + 1))));
-    this.revealPaused = false;
-    this.sealsLeft = 0;
     this.metrics = {
       board: b, attempt: this.attempt, cleared: false, baseLost: 0, integrity: BASE_INTEGRITY, waveTime: 0, dangerTime: 0,
       maxBacklog: 0, backlogOver2: 0, combosPeak: 0, kills: 0, leaks: 0, earlyCalls: 0, piecesPlaced: 0,
@@ -250,6 +359,7 @@ export class Game {
     this.batteryTower = hasBuilding(this.base, 'missileBattery') ? this.makeBattery() : null;
     this.tutorial = null;
     this.setPhase('reveal');
+    this.events.push({ t: 'strike', path: this.board.pending!, destroys: this.strikeDestroys.length });
   }
 
   get isTutorial() {
@@ -262,28 +372,34 @@ export class Game {
     this.events.push({ t: 'phase', phase: p });
   }
 
-  continueReveal() {
-    if (this.phase !== 'reveal' || !this.revealPaused) return;
-    this.revealPaused = false;
-    this.sealsLeft = 0;
-    this.board.reroute();
-  }
-
-  placeSeal(a: number, b: number): boolean {
-    if (this.phase !== 'reveal' || !this.revealPaused || this.sealsLeft <= 0) return false;
-    const k = edgeKey(a, b);
-    if (this.board.seals.has(k) || !this.board.sealAllowed(a, b)) {
-      this.events.push({ t: 'sealReject', a, b });
-      return false;
-    }
-    this.board.seals.add(k);
-    this.sealsLeft--;
-    this.events.push({ t: 'seal', a, b });
-    return true;
-  }
-
   private finishReveal() {
-    this.board.finalize();
+    const board = this.board;
+    // the strike clears anything it had to cut through; those pieces come back to the tray
+    if (this.strikeDestroys.length) {
+      const hit = new Set(this.strikeDestroys);
+      for (const t of [...this.towers]) {
+        if (!t.layers[0].some(([x, y]) => hit.has(cellIdx(x, y)))) continue;
+        this.towers = this.towers.filter((o) => o !== t);
+        for (const [x, y] of t.layers[0]) this.towerAt[cellIdx(x, y)] = 0;
+        for (const p of t.pieces) this.addPiece(p.piece, true);
+        this.events.push({ t: 'destroyed', x: t.cx, y: t.cy, cells: t.layers[0] });
+      }
+      for (const h of [...this.harvesters]) {
+        if (!h.cells.some(([x, y]) => hit.has(cellIdx(x, y)))) continue;
+        this.harvesters = this.harvesters.filter((o) => o !== h);
+        for (const [x, y] of h.cells) this.objAt[cellIdx(x, y)] = 0;
+        this.addPiece(h.piece, true);
+        this.events.push({ t: 'destroyed', x: h.cells[0][0], y: h.cells[0][1], cells: h.cells });
+      }
+      for (const r of [...this.roadPieces]) {
+        if (!r.cells.some(([x, y]) => hit.has(cellIdx(x, y)))) continue;
+        this.roadPieces = this.roadPieces.filter((o) => o !== r);
+        for (const [x, y] of r.cells) this.objAt[cellIdx(x, y)] = 0;
+      }
+      this.strikeDestroys = [];
+    }
+    board.commitPending((c) => this.objAt[c] !== 0 || this.towerAt[c] !== 0);
+    this.recomputeEntries();
     this.events.push({ t: 'revealDone' });
     // board-start grant
     if (this.isTutorial) {
@@ -325,8 +441,13 @@ export class Game {
     this.spawnQueue = [];
     let at = 0, k = 0;
     for (const n of this.wave.bursts) {
-      for (let j = 0; j < n; j++) this.spawnQueue.push({ at: at + j * 0.236, spec: this.wave.enemies[k++] });
-      at += BURST_GAP;
+      let t = at;
+      for (let j = 0; j < n; j++) {
+        const spec = this.wave.enemies[k++];
+        this.spawnQueue.push({ at: t, spec });
+        t += PACK_SPACING[spec.size];
+      }
+      at = Math.max(at + BURST_GAP, t + 0.8);
     }
     this.waveT = 0;
     this.pieceTimer = WAVE_PIECE_INTERVAL;
@@ -377,14 +498,19 @@ export class Game {
   nextBoard() {
     if (this.phase !== 'base' || this.boardNo >= BOARDS) return;
     this.attempt = 1;
+    this.boardNo++;
     this.baseSnapshot = structuredClone(this.base);
-    this.startBoard(this.boardNo + 1);
+    this.boardSnapshot = this.snapshot();
+    this.startBoard(this.boardNo);
   }
 
+  /** Restore everything to how it was when this board began, then play it again. */
   retryBoard() {
-    this.base = structuredClone(this.baseSnapshot);
+    const b = this.boardSnapshot.boardNo;
+    this.restore(this.boardSnapshot);
+    this.baseSnapshot = structuredClone(this.base);
     this.attempt++;
-    this.startBoard(this.boardNo);
+    this.startBoard(b);
   }
 
   build(square: number, id: BuildingId): string | null {
@@ -632,10 +758,12 @@ export class Game {
       this.events.push({ t: 'reject', reason: pv.reason ?? 'Illegal' });
       return pv;
     }
+    const undoState = this.undoEnabled ? this.captureUndo() : null;
     this.takePiece(s);
     this.holdLocked = false;
     this.metrics.piecesPlaced++;
     const cells = pv.cells;
+    if (undoState) this.lastPlace = { t: this.time, pieceId: piece.id, cells, color: piece.color, state: undoState };
     if (pv.kind === 'barrier' || pv.kind === 'mine') {
       const rp: RoadPiece = {
         id: this.nextId++, kind: pv.kind, piece, cells,
@@ -680,10 +808,7 @@ export class Game {
       const before = ordered[0]?.stats ?? null;
       const wasActive = ordered[0]?.active ?? false;
       if (ordered.length === 0) {
-        t = {
-          id: this.nextId++, pieces: [], layers: [], height: h0, type: null, hint: '', active: false, activateT: 0, cx: 0, cy: 0,
-          stats: null, cooldown: 0, targetId: 0, angle: -Math.PI / 2, rampTarget: 0, rampT: 0, shots: 0, kills: 0, fireFlash: 0,
-        };
+        t = this.blankTower(this.nextId++, h0);
         this.towers.push(t);
       } else {
         t = ordered[0];
@@ -709,6 +834,58 @@ export class Game {
     }
     this.tutorialAdvance('placed');
     return pv;
+  }
+
+  private captureUndo(): UndoState {
+    return {
+      towers: structuredClone(this.towers.map((t) => ({ ...t }))),
+      towerAt: this.towerAt.slice(),
+      objAt: this.objAt.slice(),
+      roadPieces: this.roadPieces.slice(),
+      harvesters: this.harvesters.slice(),
+      must: this.must.slice(),
+      may: this.may.slice(),
+      hold: this.hold,
+      holdLocked: this.holdLocked,
+      placed: this.metrics.piecesPlaced,
+      tutorial: this.tutorial ? { ...this.tutorial } : null,
+      discovered: [...this.discovered],
+    };
+  }
+
+  /** Seconds left to undo the last placement (0 when it can no longer be undone). */
+  undoLeft(): number {
+    if (!this.lastPlace || !this.canPlacePieces()) return 0;
+    return Math.max(0, UNDO_SECONDS - (this.time - this.lastPlace.t));
+  }
+
+  /** Take back the last placement: the piece returns to its slot as if it was never placed. */
+  undo(): boolean {
+    const lp = this.lastPlace;
+    if (!lp || this.undoLeft() <= 0) return false;
+    const u = lp.state;
+    // keep live combat state (cooldowns, kills) for towers that survive the undo
+    const live = new Map(this.towers.map((t) => [t.id, t]));
+    this.towers = u.towers.map((t) => {
+      const cur = live.get(t.id);
+      if (cur && cur.pieces.length === t.pieces.length) return cur;
+      if (cur) { t.cooldown = cur.cooldown; t.kills = cur.kills; t.angle = cur.angle; t.activateT = Math.max(t.activateT, cur.activateT); }
+      return t;
+    });
+    this.towerAt = u.towerAt;
+    this.objAt = u.objAt;
+    this.roadPieces = u.roadPieces;
+    this.harvesters = u.harvesters;
+    this.must = u.must;
+    this.may = u.may;
+    this.hold = u.hold;
+    this.holdLocked = u.holdLocked;
+    this.metrics.piecesPlaced = u.placed;
+    this.tutorial = u.tutorial;
+    this.discovered = new Set(u.discovered);
+    this.lastPlace = null;
+    this.events.push({ t: 'undo', pieceId: lp.pieceId, cells: lp.cells, color: lp.color });
+    return true;
   }
 
   private bonusEvents(t: Tower, before: TowerStats | null) {
@@ -787,24 +964,16 @@ export class Game {
   }
 
   private stepReveal(dt: number) {
-    if (this.revealPaused) return;
     const total = this.board.revealTotal();
-    const speed = total / REVEAL.seconds;
-    const prev = this.revealStep;
-    this.revealStep += speed * dt;
-    const pause = this.revealPauses.find((p) => prev < p && this.revealStep >= p);
-    if (pause !== undefined) {
-      this.revealStep = pause;
-      this.revealPaused = true;
-      this.sealsLeft = REVEAL.sealsPerPause;
-      this.events.push({ t: 'revealPause' });
-    }
-    for (const p of this.board.paths) p.revealed = Math.min(p.path.length, Math.floor(this.revealStep) + 1);
-    if (this.revealStep >= this.board.revealTotal() + 0.5) this.finishReveal();
+    const secs = this.board.paths.length === 0 ? REVEAL.seconds : REVEAL.strikeSeconds;
+    this.revealStep += (total / secs) * dt;
+    const p = this.board.pending;
+    if (p) p.revealed = Math.min(p.path.length, Math.floor(this.revealStep) + 1);
+    if (this.revealStep >= total + 0.5) this.finishReveal();
   }
 
   // ---------------------------------------------------------------- enemies
-  private spawn(spec: WaveSpec['enemies'][number], at?: { route: Route; d: number }, hpOverride?: number, gen = 0): Enemy {
+  private spawn(spec: EnemySpec, at?: { route: Route; d: number }, hpOverride?: number, gen = 0): Enemy {
     const sz = SIZES[spec.size];
     let route: Route;
     let overland = false;
@@ -825,24 +994,50 @@ export class Game {
       route = this.waveRng.pick(opts.length ? opts : this.board.routes);
     }
     if (at && at.route.ingress < 0) overland = true;
-    let maxHp = hpOverride ?? (this.wave!.unitHp * sz.hp);
-    if (spec.ability === 'grower' && hpOverride === undefined) maxHp *= ABILITIES.growerHp;
+    const tier = spec.tier ?? 1;
+    let maxHp = hpOverride ?? (this.wave!.unitHp * hpWeight(spec));
+    if (hpOverride !== undefined && spec.ability === 'post') maxHp *= 1;
     const p0 = routeAt(route, at?.d ?? 0);
+    const lane = overland ? 0 : (this.waveRng.next() * 2 - 1) * LANE_SPREAD * (spec.size === 'champion' || spec.size === 'boss' || spec.size === 'giant' ? 0.3 : 1);
     const e: Enemy = {
       id: this.nextId++, size: spec.size, suit: spec.suit, arch: spec.arch, ability: spec.ability, golden: spec.golden, boss: !!spec.boss,
-      gen, hp: maxHp, maxHp, shield: spec.ability === 'shielded' ? maxHp * ABILITIES.shield : 0,
+      element: spec.element ?? 'H', group: spec.group ?? 'nonmetal', tier, champion: !!spec.champion,
+      gen, hp: maxHp, maxHp, shield: 0, shieldMax: 0,
+      lane, sdir: p0.dir, lastHitT: -99, summonT: CHAMPION.summonEvery * 0.6,
       route, overland, d: at?.d ?? 0, x: p0.x, y: p0.y, px: p0.x, py: p0.y, dir: p0.dir,
       speed: sz.speed, slowT: 0, slowMult: 1, dots: [], animT: this.waveRng.next() * 10,
-      airborne: false, stretched: false, immune: false, abilityT: 0, heraldBoost: false, chewing: 0, lastTower: 0, shed: 0, alive: true,
-      scale: (spec.ability === 'grower' ? 1.3 : 1) * (gen > 0 ? Math.pow(0.8, gen) : 1), hitFlash: 0,
+      airborne: false, stretched: false, immune: false, abilityT: this.waveRng.next() * 3, heraldBoost: false, chewing: 0, lastTower: 0, shed: 0, alive: true,
+      scale: (spec.ability === 'post' ? 1.25 : 1) * TIER_SCALE[tier - 1] * (gen > 0 ? Math.pow(0.8, gen) : 1), hitFlash: 0,
     };
+    if (e.ability === 'noble') e.shield = e.shieldMax = maxHp * ABILITIES.shield;
     if (e.arch === 'roller') e.speed *= ARCH.rollerSpeed;
     if (e.arch === 'nautilus') e.speed *= ARCH.nautilusSpeed;
     if (e.arch === 'balloon') e.speed *= ARCH.balloonSpeed;
-    if (e.ability === 'swift') e.speed *= ABILITIES.swift;
-    if (e.ability === 'hoarder') e.speed *= ABILITIES.hoarderSpeed;
+    if (e.ability === 'precious') e.speed *= ABILITIES.hoarderSpeed;
+    this.placeOnRoute(e);
+    e.px = e.x; e.py = e.y;
     this.enemies.push(e);
+    if (e.element && !this.discoveredElements.has(e.element) && gen === 0) {
+      this.discoveredElements.add(e.element);
+      this.events.push({ t: 'discover', element: e.element, group: e.group });
+    }
+    if ((e.champion || e.boss) && gen === 0) this.events.push({ t: 'champion', x: e.x, y: e.y, boss: e.boss });
     return e;
+  }
+
+  /** Position on the road, spread across its width so swarms move as a crowd. */
+  private placeOnRoute(e: Enemy) {
+    const p = routeAt(e.route, e.d);
+    e.dir = p.dir;
+    if (e.overland) { e.x = p.x; e.y = p.y; e.sdir = p.dir; return; }
+    let diff = p.dir - e.sdir;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    e.sdir += diff * Math.min(1, DT * 7);
+    const wob = Math.sin(e.animT * 1.7 + e.id) * 0.12;
+    const off = e.lane + wob;
+    e.x = p.x - Math.sin(e.sdir) * off;
+    e.y = p.y + Math.cos(e.sdir) * off;
   }
 
   private stepEnemies(dt: number) {
@@ -850,7 +1045,7 @@ export class Game {
     for (const e of this.enemies) e.heraldBoost = false;
     for (const e of this.enemies) {
       if (!e.alive) continue;
-      if (e.ability === 'herald')
+      if (e.ability === 'chalcogen')
         for (const o of this.enemies) if (o !== e && Math.hypot(o.x - e.x, o.y - e.y) < ABILITIES.heraldRadius) o.heraldBoost = true;
     }
     for (const e of this.enemies) {
@@ -862,14 +1057,15 @@ export class Game {
       if (e.arch === 'hopper') e.airborne = (e.animT % ARCH.hopperCycle) / ARCH.hopperCycle < ARCH.hopperAir;
       if (e.arch === 'slinky') e.stretched = Math.sin((e.animT / ARCH.slinkyCycle) * Math.PI * 2) > 0;
       if (e.arch === 'tumbler' && e.animT % ARCH.tumblerFlip < dt) e.suit = SUITS[(SUITS.indexOf(e.suit) + 1) % 4];
-      // abilities
+      // element abilities
       switch (e.ability) {
-        case 'regen': e.hp = Math.min(e.maxHp, e.hp + e.maxHp * ABILITIES.regen * dt); break;
-        case 'phase': e.immune = e.abilityT % ABILITIES.phaseEvery > ABILITIES.phaseEvery - ABILITIES.phaseTime; break;
-        case 'blink':
-          if (e.abilityT >= ABILITIES.blinkEvery) { e.abilityT = 0; e.d = Math.min(e.route.length - 3, e.d + ABILITIES.blinkCells); }
+        case 'lanthanide': e.hp = Math.min(e.maxHp, e.hp + e.maxHp * ABILITIES.regen * dt); break;
+        case 'metalloid': e.immune = e.abilityT % ABILITIES.phaseEvery > ABILITIES.phaseEvery - ABILITIES.phaseTime; break;
+        case 'noble':
+          if (this.time - e.lastHitT > ABILITIES.shieldDelay && e.shield < e.shieldMax)
+            e.shield = Math.min(e.shieldMax, e.shield + e.shieldMax * ABILITIES.shieldRecharge * dt);
           break;
-        case 'bearer':
+        case 'alkaline':
           if (e.abilityT >= ABILITIES.bearerEvery) {
             e.abilityT = 0;
             for (const o of this.enemies)
@@ -877,6 +1073,19 @@ export class Game {
                 o.shield = Math.max(o.shield, o.maxHp * ABILITIES.bearerShield);
           }
           break;
+      }
+      // champions summon packs of mites
+      if (e.champion && !e.overland) {
+        e.summonT -= dt;
+        if (e.summonT <= 0) {
+          e.summonT = CHAMPION.summonEvery;
+          for (let k = 0; k < CHAMPION.summonCount; k++) {
+            const m = this.spawn({ size: 'mite', suit: e.suit, arch: e.arch === 'balloon' ? 'crawler' : 'crawler', ability: null, element: 'H', group: 'nonmetal', tier: 1, golden: false, pack: 0 },
+              { route: e.route, d: Math.max(0, e.d - 0.6 - k * 0.5) }, (this.wave?.unitHp ?? 50) * SIZES.mite.hp, 1);
+            m.lane = (k - 1) * 0.8;
+          }
+          this.events.push({ t: 'summon', x: e.x, y: e.y, n: CHAMPION.summonCount });
+        }
       }
       // DoTs
       for (const d of e.dots) {
@@ -889,6 +1098,7 @@ export class Game {
       // slows
       if (e.slowT > 0) { e.slowT -= dt; if (e.slowT <= 0) e.slowMult = 1; }
       let v = e.speed * e.slowMult * (e.heraldBoost ? ABILITIES.heraldSpeed : 1);
+      if (e.ability === 'alkali' && e.abilityT % ABILITIES.alkaliEvery < ABILITIES.alkaliBurst) v *= ABILITIES.alkaliMult;
       if (e.arch === 'roller' && e.route.corners.some((c) => Math.abs(c - e.d) < 2.5)) v *= ARCH.rollerBrake;
       // barriers
       e.chewing = 0;
@@ -901,15 +1111,14 @@ export class Game {
           if (e.d <= stop + 0.01 && e.d + v * dt >= stop) {
             e.d = Math.max(e.d, stop);
             e.chewing = rp.id;
-            rp.hp -= COMBAT.barrierChew * Math.sqrt(SIZES[e.size].hp) * (this.wave?.unitHp ?? 1) * dt;
+            rp.hp -= COMBAT.barrierChew * Math.sqrt(SIZES[e.size].hp * e.tier) * (this.wave?.unitHp ?? 1) * dt;
             if (rp.hp <= 0) this.breakBarrier(rp);
             break;
           }
         }
       }
       if (!e.chewing) e.d += v * dt;
-      const p = routeAt(e.route, e.d);
-      e.x = p.x; e.y = p.y; e.dir = p.dir;
+      this.placeOnRoute(e);
       if (e.d >= e.route.length) this.leak(e);
     }
   }
@@ -928,7 +1137,7 @@ export class Game {
 
   private leak(e: Enemy) {
     e.alive = false;
-    let dmg = SIZES[e.size].leak + (e.ability === 'grower' ? ABILITIES.growerLeak : 0);
+    let dmg = SIZES[e.size].leak + (e.ability === 'post' ? ABILITIES.growerLeak : 0) + (e.tier >= 3 ? 1 : 0);
     if (this.isTutorial && this.waveT < 20) dmg = 0;
     const fromBuffer = Math.min(this.buffer, dmg);
     this.buffer -= fromBuffer;
@@ -955,6 +1164,8 @@ export class Game {
       if (o.beam || o.area) m *= ARCH.swingerWeak;
     }
     if (e.arch === 'slinky' && e.stretched && o.splash) m *= ARCH.slinkySplash;
+    if (e.arch === 'blob' && (o.splash || o.area)) m *= ARCH.blobSplash;
+    if (e.arch === 'beetle' && o.single) m *= ARCH.beetleBullet;
     if (e.arch === 'nautilus' && o.fx !== undefined && o.fy !== undefined) {
       const a = Math.atan2(o.fy - e.y, o.fx - e.x);
       let diff = Math.abs(a - e.dir) % (Math.PI * 2);
@@ -963,6 +1174,8 @@ export class Game {
     }
     let dmg = amount * m;
     if (t?.stats?.critChance && !o.dot && this.combat.chance(t.stats.critChance)) { dmg *= GLYPHS.critMult; o.crit = true; }
+    if (e.ability === 'transition' && !o.dot) dmg = Math.max(dmg * ABILITIES.armorFloor, dmg - ABILITIES.armor * (this.wave?.unitHp ?? 50));
+    if (!o.dot) e.lastHitT = this.time;
     if (e.shield > 0 && !o.ignoreShield) {
       const s = Math.min(e.shield, dmg);
       e.shield -= s;
@@ -987,7 +1200,7 @@ export class Game {
   }
 
   private slow(e: Enemy, mult: number, time: number) {
-    if (e.size === 'boss') mult = 1 - (1 - mult) * 0.5;
+    if (e.size === 'boss' || e.size === 'champion') mult = 1 - (1 - mult) * 0.5;
     e.slowMult = Math.min(e.slowMult, mult);
     e.slowT = Math.max(e.slowT, time);
   }
@@ -1001,27 +1214,37 @@ export class Game {
     const n = [1, 1, 2, 3, 5][e.shed];
     e.shed++;
     for (let i = 0; i < n; i++)
-      this.spawn({ size: 'small', suit: this.waveRng.pick(SUITS), arch: 'hopper', ability: null, golden: false }, { route: e.route, d: Math.max(0, e.d - 0.5 - i * 0.4) }, this.wave!.unitHp);
+      this.spawn({ size: 'small', suit: this.waveRng.pick(SUITS), arch: 'hopper', ability: null, element: 'H', group: 'nonmetal', tier: 1, golden: false, pack: 0 }, { route: e.route, d: Math.max(0, e.d - 0.5 - i * 0.4) }, this.wave!.unitHp, 1);
     this.events.push({ t: 'explode', x: e.x, y: e.y, r: 2, color: 'gold' });
   }
 
   private kill(e: Enemy, t: Tower | null) {
     e.alive = false;
     this.metrics.kills++;
-    let essence = SIZES[e.size].essence * (t?.stats?.essenceMult ?? 1);
-    if (e.gen > 0) essence = Math.max(0.5, essence / 2);
-    if (e.ability === 'hoarder') essence += ABILITIES.hoarderEssence;
+    let essence = SIZES[e.size].essence * TIER_ESSENCE[e.tier - 1] * (t?.stats?.essenceMult ?? 1);
+    if (e.gen > 0) essence = Math.max(0.25, essence / 2);
+    if (e.ability === 'precious') essence += ABILITIES.hoarderEssence;
     this.base.essence += essence;
     if (t) t.kills++;
     if (e.golden) this.addPiece(this.stream.make(this.combat.pick(['T', 'L', 'I', 'O'] as const), 'gold', null, true), true);
     // boss final shed
     if (e.boss && e.shed < 5) { e.shed = 4; this.bossShed(e); }
-    // splitter
-    const split = e.ability === 'splitter' && e.gen < ABILITIES.splitGenerations - 1;
+    // champions burst open and drop loot
+    if (e.champion) {
+      const ore = CHAMPION.lootOre, ess = CHAMPION.lootEssence;
+      this.base.essence += ess;
+      this.base.ore += ore;
+      this.addPiece(this.stream.make(this.combat.pick(['T', 'L', 'I', 'O', 'J'] as const), 'gold', null, true), true);
+      this.events.push({ t: 'loot', x: e.x, y: e.y, essence: ess, ore, golden: true });
+    }
+    // actinides split
+    const split = e.ability === 'actinide' && e.gen < ABILITIES.splitGenerations - 1 && !e.champion;
     if (split)
       for (let i = 0; i < 2; i++) {
-        const c = this.spawn({ size: e.size, suit: e.suit, arch: e.arch, ability: 'splitter', golden: false }, { route: e.route, d: Math.max(0, e.d - 0.4 + i * 0.8) }, e.maxHp * ABILITIES.splitHp, e.gen + 1);
-        c.x = e.x; c.y = e.y;
+        const c = this.spawn({ size: e.size, suit: e.suit, arch: e.arch, ability: 'actinide', element: e.element, group: e.group, tier: e.tier, golden: false, pack: 0 }, { route: e.route, d: Math.max(0, e.d - 0.4 + i * 0.8) }, e.maxHp * ABILITIES.splitHp, e.gen + 1);
+        c.lane = Math.max(-1, Math.min(1, e.lane + (i ? 0.5 : -0.5)));
+        this.placeOnRoute(c);
+        c.px = c.x; c.py = c.y;
       }
     // spreading DoTs
     const virus = e.dots.find((d) => d.kind === 'virus');
@@ -1031,7 +1254,7 @@ export class Game {
       const near = this.enemies.filter((o) => o.alive && o !== e && Math.hypot(o.x - e.x, o.y - e.y) < 3).slice(0, 2);
       for (const o of near) this.addDot(o, { ...d, t: d.kind === 'virus' ? COMBAT.virusDuration : 3 });
     }
-    this.events.push({ t: 'kill', x: e.x, y: e.y, size: e.size, suit: e.suit, arch: e.arch, split, essence });
+    this.events.push({ t: 'kill', x: e.x, y: e.y, size: e.size, suit: e.suit, arch: e.arch, split, essence, group: e.group, tier: e.tier, champion: e.champion || e.boss });
     // combos
     if (this.time - this.combo.last <= COMBO.window) this.combo.n++; else this.combo.n = 1;
     this.combo.last = this.time;
@@ -1058,7 +1281,7 @@ export class Game {
     for (const e of this.enemies) {
       if (!this.canHit(t, e) || !this.inRange(t, e, range)) continue;
       let score = e.d / e.route.length;
-      if (e.arch === 'walker' || e.boss) score += 10;
+      if (e.arch === 'walker' || e.boss || e.champion) score += 10;
       if (missile && (e.arch === 'balloon' || e.size === 'giant')) score += 5;
       if (e.immune) score -= 3;
       if (score > bestScore) { bestScore = score; best = e; }
@@ -1067,9 +1290,13 @@ export class Game {
   }
 
   private stepTowers(dt: number) {
+    const halogens = this.enemies.filter((e) => e.alive && e.ability === 'halogen');
+    const r2 = ABILITIES.corrosiveRadius ** 2;
     for (const t of this.towers) {
       if (!t.active || !t.stats || t.activateT < COMBAT.activateTime) continue;
-      this.fireTower(t, dt);
+      const corroded = halogens.some((e) => (e.x - t.cx) ** 2 + (e.y - t.cy) ** 2 < r2);
+      t.corroded = corroded;
+      this.fireTower(t, corroded ? dt * ABILITIES.corrosiveRate : dt);
     }
   }
 

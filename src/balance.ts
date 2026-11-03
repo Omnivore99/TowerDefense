@@ -28,28 +28,32 @@ export const MODES = {
 export type ModeId = keyof typeof MODES;
 
 // ---------------------------------------------------------------- map
-export const MACRO_W = 13;
-export const MACRO_H = 8;
+// v1.1: one persistent 21 x 13 map (the next Fibonacci pair). Each board adds one road.
+export const MACRO_W = 21;
+export const MACRO_H = 13;
 export const MACRO = 8; // cells per macro square
-export const GRID_W = MACRO_W * MACRO; // 104
-export const GRID_H = MACRO_H * MACRO; // 64
-export const CORE_MACRO = { x: 8, y: 5 };
+export const GRID_W = MACRO_W * MACRO; // 168
+export const GRID_H = MACRO_H * MACRO; // 104
+export const CORE_MACRO = { x: 13, y: 8 }; // golden-section point
 export const CORE_RADIUS = 3; // cells blocked around the core centre
-export const INGRESS_BY_BOARD = [1, 1, 1, 2, 2, 3, 3];
+/** New roads: how strongly a road prefers to join the network close to the core (cost per macro of road distance). */
+export const JOIN_K = 4;
+/** Cost of forcing a road through a macro edge that has towers on it (the strike destroys them). */
+export const BLOCKED_EDGE_COST = 400;
 export const ROAD = {
   spiralK: 1.6, // weight of distance to the guide spiral
   noise: 0.9,
   spiralA: 0.42, // r(theta) = a * phi^(2 theta / pi), macro units
   forkP: 0.12,
   forkFromBoard: 3,
-  minLenBase: 125, // L_min = 125 - 6 b (+-10)
-  minLenPerBoard: 6,
+  minLenBase: 150, // first road only
+  minLenPerBoard: 0,
   minLenJitter: 10,
   attempts: 60,
 };
-export const REVEAL = { seconds: 4, pauses: 2, sealsPerPause: 2 };
+export const REVEAL = { seconds: 3, strikeSeconds: 1.8, pauses: 0, sealsPerPause: 0 };
 export const TERRAIN = { featuresPerMacro: [0, 0, 0, 1, 1, 2], blobSizes: [2, 3, 5], rise: [1, 3], valley: [-2, -1] };
-export const ORE = { min: 3, max: 5, size: 3 };
+export const ORE = { min: 4, max: 5, size: 3, perNewRoad: 2 };
 
 // ---------------------------------------------------------------- pieces
 export const PIECE_WEIGHTS: Record<string, number> = { I: 1.0, O: 1.0, T: 1.1, S: 0.55, Z: 0.55, J: 0.55, L: 0.55 };
@@ -134,27 +138,38 @@ export const GLYPHS = {
 export const RESONANCE = { burnSplash: 0.3, ricochet: 2, blueSplash: 1.5, poisonSpread: 0.5 };
 
 // ---------------------------------------------------------------- enemies
-export type Size = 'small' | 'medium' | 'large' | 'giant' | 'boss';
+export type Size = 'mite' | 'small' | 'medium' | 'large' | 'giant' | 'champion' | 'boss';
 export const SIZES: Record<Size, { hp: number; speed: number; leak: number; essence: number; radius: number }> = {
+  mite:   { hp: 1 / PHI ** 2, speed: 3.7,             leak: 1, essence: 0.5, radius: 0.36 },
   small:  { hp: 1,          speed: 3.2,               leak: 1, essence: 1, radius: 0.55 },
   medium: { hp: PHI,        speed: 3.2 / SQRT_PHI,    leak: 2, essence: 2, radius: 0.7 },
   large:  { hp: PHI ** 2,   speed: 3.2 / PHI,         leak: 3, essence: 3, radius: 0.85 },
   giant:  { hp: PHI ** 4,   speed: 1.2,               leak: 5, essence: 5, radius: 1.3 },
-  boss:   { hp: PHI ** 5,   speed: 1.0,               leak: 8, essence: 13, radius: 1.6 },
+  champion: { hp: PHI ** 5, speed: 1.05,              leak: 8, essence: 21, radius: 1.5 },
+  boss:   { hp: PHI ** 6,   speed: 0.95,              leak: 13, essence: 34, radius: 1.9 },
 };
 export const SUIT_MULT = { strong: SQRT_PHI, weak: 1 / SQRT_PHI };
 
-export type Archetype = 'hopper' | 'slinky' | 'roller' | 'swinger' | 'tumbler' | 'nautilus' | 'balloon' | 'walker';
+export type Archetype =
+  | 'hopper' | 'slinky' | 'roller' | 'swinger' | 'tumbler' | 'nautilus' | 'balloon' | 'walker'
+  | 'crawler' | 'beetle' | 'blob';
 /** Road archetypes unlocked per board (cumulative). */
 export const ARCHETYPES_BY_BOARD: Archetype[][] = [
-  ['hopper'],
-  ['hopper', 'slinky', 'roller'],
-  ['hopper', 'slinky', 'roller', 'swinger', 'tumbler'],
-  ['hopper', 'slinky', 'roller', 'swinger', 'tumbler', 'nautilus'],
-  ['hopper', 'slinky', 'roller', 'swinger', 'tumbler', 'nautilus'],
-  ['hopper', 'slinky', 'roller', 'swinger', 'tumbler', 'nautilus'],
-  ['hopper', 'slinky', 'roller', 'swinger', 'tumbler', 'nautilus'],
+  ['hopper', 'crawler'],
+  ['hopper', 'crawler', 'slinky', 'roller', 'blob'],
+  ['hopper', 'crawler', 'slinky', 'roller', 'blob', 'swinger', 'tumbler', 'beetle'],
+  ['hopper', 'crawler', 'slinky', 'roller', 'blob', 'swinger', 'tumbler', 'beetle', 'nautilus'],
+  ['hopper', 'crawler', 'slinky', 'roller', 'blob', 'swinger', 'tumbler', 'beetle', 'nautilus'],
+  ['hopper', 'crawler', 'slinky', 'roller', 'blob', 'swinger', 'tumbler', 'beetle', 'nautilus'],
+  ['hopper', 'crawler', 'slinky', 'roller', 'blob', 'swinger', 'tumbler', 'beetle', 'nautilus'],
 ];
+/** Forms that can come as mites (tiny swarm monsters). */
+export const MITE_FORMS: Archetype[] = ['crawler', 'hopper', 'blob'];
+/** Share of small slots that become a pack of 3 mites, by board. */
+export const MITE_SHARE = [0.25, 0.45, 0.5, 0.55, 0.6, 0.6, 0.65];
+export const MITES_PER_SMALL = 3;
+/** Lateral spread of a swarm on the road (cells either side of the centre line). */
+export const LANE_SPREAD = 1.05;
 export const ARCH = {
   hopperCycle: 0.618, hopperAir: 0.45,
   slinkyCycle: 1.0, slinkySplash: 1.5,
@@ -164,31 +179,78 @@ export const ARCH = {
   nautilusSpeed: 0.8, nautilusFront: 0.5,
   balloonSpeed: 0.7, balloonFromBoard: 4, balloonEvery: 13,
   walkerFromBoard: 5, walkerEvery: 21,
+  beetleBullet: 0.85, // hard shell: single shots deal 85%
+  blobSplash: 1.2, // soft body: splash deals 120%
 };
 
+// ---------------------------------------------------------------- elements
+// Every monster carries an element. Its periodic-table group grants an ability.
 export type Ability =
-  | 'shielded' | 'swift' | 'blink' | 'splitter' | 'bearer' | 'grower'
-  | 'regen' | 'phase' | 'herald' | 'hoarder';
-export const ABILITY_LIST: Ability[] = ['shielded', 'swift', 'blink', 'splitter', 'bearer', 'grower', 'regen', 'phase', 'herald', 'hoarder'];
+  | 'alkali' | 'alkaline' | 'transition' | 'post' | 'lanthanide' | 'actinide'
+  | 'metalloid' | 'chalcogen' | 'halogen' | 'noble' | 'precious';
+export type Group = Ability | 'nonmetal';
+export interface GroupDef { name: string; symbols: string[]; color: number; ability: string; counter: string; fromBoard: number }
+export const GROUPS: Record<Group, GroupDef> = {
+  nonmetal:   { name: 'Nonmetal',          symbols: ['H', 'C', 'N', 'P'],              color: 0x9fb4c8, ability: 'No special ability', counter: 'Anything', fromBoard: 1 },
+  alkali:     { name: 'Alkali metal',      symbols: ['Li', 'Na', 'K', 'Rb', 'Cs'],     color: 0xff8a5c, ability: 'Speed bursts every few seconds', counter: 'Slows and chokepoints', fromBoard: 2 },
+  lanthanide: { name: 'Lanthanide',        symbols: ['La', 'Ce', 'Nd', 'Eu', 'Gd'],    color: 0x7aff9a, ability: 'Regenerates health over time', counter: 'Burst damage and burn', fromBoard: 2 },
+  precious:   { name: 'Precious metal',    symbols: ['Au', 'Ag', 'Pt'],                color: 0xffe08a, ability: 'Fast, drops a pile of Essence', counter: 'Catch it for a jackpot', fromBoard: 2 },
+  transition: { name: 'Transition metal',  symbols: ['Ti', 'Fe', 'Co', 'Ni', 'Cu', 'Zn'], color: 0xc7cbd9, ability: 'Armour cuts every hit by a flat amount', counter: 'Heavy single shots', fromBoard: 3 },
+  noble:      { name: 'Noble gas',         symbols: ['He', 'Ne', 'Ar', 'Kr', 'Xe'],    color: 0x9fd8ff, ability: 'Force field that absorbs damage, then recharges', counter: 'Rapid fire to pop the shield', fromBoard: 3 },
+  actinide:   { name: 'Actinide',          symbols: ['Th', 'U', 'Np', 'Pu'],           color: 0xfff07a, ability: 'Splits into smaller monsters on death', counter: 'Splash damage', fromBoard: 4 },
+  chalcogen:  { name: 'Chalcogen',         symbols: ['O', 'S', 'Se', 'Te'],            color: 0xffd36b, ability: 'Speeds up monsters around it', counter: 'Focus it first', fromBoard: 4 },
+  metalloid:  { name: 'Metalloid',         symbols: ['B', 'Si', 'Ge', 'As', 'Sb'],     color: 0xc0a8ff, ability: 'Phases out briefly and cannot be hit', counter: 'Area damage and sprays', fromBoard: 5 },
+  alkaline:   { name: 'Alkaline earth',    symbols: ['Be', 'Mg', 'Ca', 'Sr', 'Ba'],    color: 0x7ac8ff, ability: 'Shields the monsters around it', counter: 'Long range snipers', fromBoard: 5 },
+  halogen:    { name: 'Halogen',           symbols: ['F', 'Cl', 'Br', 'I'],            color: 0xb6ff5c, ability: 'Corrosive aura slows nearby towers', counter: 'Long range', fromBoard: 6 },
+  post:       { name: 'Post-transition metal', symbols: ['Al', 'Ga', 'In', 'Sn', 'Pb'], color: 0xff9f7a, ability: 'Dense: much more health, hits the core harder', counter: 'Sustained damage', fromBoard: 6 },
+};
+export const ABILITY_LIST = (Object.keys(GROUPS) as Group[]).filter((g) => g !== 'nonmetal') as Ability[];
 export const ABILITIES = {
-  fromBoard: 3, perBoard: 0.08, max: 0.4, goldenChance: 1 / 89,
-  shield: 0.38, swift: SQRT_PHI, blinkCells: 8, blinkEvery: 5,
-  splitHp: 1 / (PHI * PHI), splitGenerations: 4,
+  /** Chance a pack carries a non-nonmetal element, by board. */
+  chanceByBoard: [0, 0.22, 0.32, 0.42, 0.5, 0.55, 0.6],
+  goldenChance: 1 / 89,
+  shield: 0.38, shieldDelay: 2.5, shieldRecharge: 0.2, // noble: share of max HP, seconds before recharge, share of shield per second
+  alkaliEvery: 4, alkaliBurst: 1.1, alkaliMult: 2.0,
+  armor: 0.05, armorFloor: 0.35, // transition: flat cut as share of unit HP; a hit never drops below 35%
+  splitHp: 1 / (PHI * PHI), splitGenerations: 3,
   bearerShield: 0.2, bearerEvery: 3, bearerRadius: 3,
   growerHp: PHI * PHI, growerLeak: 2,
   regen: 0.02, phaseEvery: 3, phaseTime: T.l,
   heraldSpeed: 1.2, heraldRadius: 3,
   hoarderSpeed: 1.3, hoarderEssence: 8,
+  corrosiveRadius: 5, corrosiveRate: 0.7, // halogen: towers within radius fire at 70% rate
 };
 
+// ---------------------------------------------------------------- tiers
+/** Tier odds [I, II, III, IV] per board. */
+export const TIER_ODDS = [
+  [1, 0, 0, 0], [0.8, 0.2, 0, 0], [0.6, 0.35, 0.05, 0], [0.45, 0.4, 0.15, 0],
+  [0.3, 0.4, 0.25, 0.05], [0.2, 0.35, 0.3, 0.15], [0.1, 0.3, 0.35, 0.25],
+];
+export const TIER_HP = [1, PHI, PHI ** 2, PHI ** 3]; // HP weight inside the wave budget
+export const TIER_SCALE = [1, 1.1, 1.2, 1.32];
+export const TIER_ESSENCE = [1, 1.5, 2, 2.5];
+
+// ---------------------------------------------------------------- sub-bosses
+export const CHAMPION = {
+  fromBoard: 3,
+  /** Waves that bring a champion, per board (1-based wave index; 0 = last wave). */
+  waves: [[], [], [0], [0], [3, 0], [4, 0], [5, 10]],
+  summonEvery: 3.5, summonCount: 3,
+  lootEssence: 13, lootOre: 8,
+};
+export const UNDO_SECONDS = 2;
+
 // ---------------------------------------------------------------- waves
-export const WAVE_LADDER = [5, 8, 13, 21, 34, 55];
+export const WAVE_LADDER = [5, 8, 13, 21, 34, 55, 89];
 export const BURSTS = [1, 1, 2, 3, 5, 8, 13, 21, 34];
 export const BURST_GAP = 2.5;
+/** Seconds between monsters inside a pack, by size. */
+export const PACK_SPACING: Record<Size, number> = { mite: 0.07, small: 0.14, medium: 0.2, large: 0.26, giant: 0.4, champion: 0.5, boss: 0.5 };
 export const PIECES_PER_WAVE_CYCLE = 9.5;
 export const HP_ALPHA = 1.3;
 /** H_b per board on Normal. Recalibrated with the bot harness (see README). */
-export const H_B = [246, 500, 260, 225, 235, 140, 142];
+export const H_B = [420, 1300, 430, 560, 640, 600, 660]; // v1.1: towers persist, so later boards carry much more health
 export const TENSION = { start: 0.72, end: 1.0, spike: 1.12, exhale: 0.9, spikes: [2, 3, 5, 8], single: [0.75, 0.9] };
 export const DOMINANT_SHARE = 0.5;
 export const BOSS_SHED = [1, 1, 2, 3, 5];

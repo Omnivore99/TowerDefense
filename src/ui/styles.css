@@ -96,10 +96,63 @@ button.primary:hover:not(:disabled) { background: linear-gradient(180deg, #ffe08
 @keyframes pulse { 50% { transform: scale(1.07); } }
 
 /* reveal & tutorial */
-#revealPanel { position: absolute; left: calc(176px + (100vw - 188px) / 2); bottom: 8px; transform: translateX(-50%); width: min(760px, calc(100vw - 200px)); padding: 7px 12px; font-size: 13px; display: flex; align-items: center; gap: 14px; }
-.rv-text { flex: 1; line-height: 1.35; }
-.rv-title { font-weight: 800; }
-.rv-dim { color: var(--dim); }
+/* sub-boss bar */
+#bossBar { position: absolute; left: calc(176px + (100vw - 188px) / 2); top: 58px; transform: translateX(-50%); width: min(520px, calc(100vw - 210px)); pointer-events: none !important; text-align: center; }
+.bb-name { font-weight: 800; font-size: 13px; color: #ffe0a0; text-shadow: 0 1px 3px #000; margin-bottom: 3px; letter-spacing: .02em; }
+.bb-track { position: relative; height: 12px; background: rgba(10,12,22,.8); border: 1px solid #ffb35c; border-radius: 6px; overflow: hidden; box-shadow: 0 0 12px rgba(255,93,108,.35); }
+.bb-fill { position: absolute; inset: 0 auto 0 0; background: linear-gradient(#ff8a8a, #d63a4a); transition: width .15s; }
+.bb-shield { position: absolute; left: 0; top: 0; height: 4px; background: #9fd8ff; }
+/* toasts */
+#toasts { position: absolute; right: 12px; top: 62px; display: flex; flex-direction: column; gap: 6px; pointer-events: none !important; z-index: 6; }
+.toast { display: flex; gap: 10px; align-items: center; background: rgba(14,18,34,.92); border: 1px solid var(--c); border-left-width: 4px; border-radius: 10px; padding: 7px 12px 7px 8px; font-size: 12.5px; min-width: 210px; max-width: 290px; animation: toastIn .35s cubic-bezier(.2,1.4,.4,1) both; box-shadow: 0 4px 18px rgba(0,0,0,.4); }
+.toast span { color: var(--dim); }
+.toast .tk { flex: none; width: 34px; height: 34px; border-radius: 6px; display: grid; place-items: center; font-weight: 900; font-size: 15px; color: #0b0f1a; background: var(--c); }
+.toast.out { opacity: 0; transform: translateX(20px); transition: all .4s; }
+@keyframes toastIn { from { opacity: 0; transform: translateX(40px) scale(.9); } }
+.next .champ { color: #ff8a8a; }
+.elchip { display: inline-block; min-width: 18px; padding: 0 3px; margin-left: 2px; border-radius: 4px; font-size: 10.5px; font-weight: 900; color: #0b0f1a; background: var(--c); text-align: center; line-height: 16px; }
+/* bestiary */
+.ptable { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; max-height: 60vh; overflow-y: auto; }
+.eg { background: #0f1528; border: 1px solid var(--line); border-top: 3px solid var(--c); border-radius: 10px; padding: 8px; }
+.eg-head { font-weight: 800; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.eg-head i { font-style: normal; color: var(--dim); font-weight: 600; font-size: 10.5px; margin-left: auto; }
+.eg-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--c); }
+.eg-cells { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.el { width: 30px; height: 30px; border-radius: 5px; display: grid; place-items: center; border: 1px dashed #3a4470; color: #4a5378; font-size: 13px; }
+.el.known { border: none; background: var(--c); color: #0b0f1a; box-shadow: inset 0 -3px 0 rgba(0,0,0,.25), inset 0 2px 0 rgba(255,255,255,.35); }
+.eg-ab { font-size: 11.5px; line-height: 1.35; }
+.eg-ab span { color: var(--dim); }
+/* base building art */
+.base-svg .sq.built rect { fill: #182030; }
+.base-svg .labels .blabel { fill: #fff; paint-order: stroke; stroke: #0b0f1a; stroke-width: .08px; }
+.base-svg .art { pointer-events: none; }
+.base-svg .art.rise { animation: artRise .618s 1.5s cubic-bezier(.2,1.5,.4,1) both; transform-box: fill-box; transform-origin: bottom; }
+@keyframes artRise { from { transform: scaleY(0); opacity: 0; } }
+.base-svg .win { animation: win 4s ease-in-out infinite; }
+@keyframes win { 0%, 100% { opacity: .95; } 45% { opacity: .55; } 50% { opacity: 1; } }
+.base-svg .puff { animation: puff 2.4s linear infinite; transform-box: fill-box; transform-origin: center; }
+@keyframes puff { 0% { transform: translate(0, 0) scale(.4); opacity: 0; } 15% { opacity: 1; } 100% { transform: translate(8px, -26px) scale(1.8); opacity: 0; } }
+.base-svg .blink { animation: blink 1.6s steps(1) infinite; }
+@keyframes blink { 50% { opacity: .25; } }
+.base-svg .pulse { animation: bpulse 2s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+@keyframes bpulse { from { transform: scale(.5); opacity: 1; } to { transform: scale(2.4); opacity: 0; } }
+.base-svg .spin { animation: spin 4s linear infinite; }
+.base-svg .orbit { animation: spin 9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.base-svg .sweep { animation: sweep 5s ease-in-out infinite alternate; }
+@keyframes sweep { from { transform: rotate(-30deg); } to { transform: rotate(30deg); } }
+.base-svg .core { animation: core 2.2s ease-in-out infinite; }
+@keyframes core { 50% { opacity: .55; } }
+.base-svg .zap { animation: blink .7s steps(1) infinite; }
+.base-svg .bob { animation: bob 2.4s ease-in-out infinite; }
+@keyframes bob { 50% { transform: translateY(-3px); } }
+.base-svg .belt { animation: belt 1.5s linear infinite; }
+@keyframes belt { to { transform: translateX(12px); } }
+.base-svg .tank { animation: tank 6s ease-in-out infinite; }
+@keyframes tank { 50% { transform: translateX(26px); } }
+.base-svg .beam { animation: beam 3s ease-in-out infinite; }
+@keyframes beam { 0%, 70%, 100% { opacity: 0; } 80% { opacity: .8; } }
+@media (prefers-reduced-motion: reduce) { .base-svg .art * { animation: none !important; } }
 #btnContinue { white-space: nowrap; }
 #tutorial { position: absolute; left: 16px; width: 144px; top: 330px; padding: 10px; font-size: 12.5px; line-height: 1.45; border-color: rgba(255, 211, 107, 0.5); background: rgba(40, 34, 18, 0.92); }
 .tut-step { display: table; margin-bottom: 6px; font-size: 10px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: #2a1d05; background: var(--gold); border-radius: 4px; padding: 1px 6px; margin-right: 8px; }
@@ -205,7 +258,7 @@ button.primary:hover:not(:disabled) { background: linear-gradient(180deg, #ffe08
   .next { display: none; }
   #card { width: 200px; }
   #tutorial { width: 124px; }
-  #readyWrap, #revealPanel, #banner { left: calc(156px + (100vw - 168px) / 2); }
+  #readyWrap, #bossBar, #banner { left: calc(156px + (100vw - 168px) / 2); }
   .b-main { font-size: 34px; }
 }
 @media (max-width: 720px) {

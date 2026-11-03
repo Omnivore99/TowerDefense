@@ -113,7 +113,8 @@ export class AudioEngine {
     for (let i = 0; i < len; i++) this.tone(penta(i + 5 + Math.min(5, Math.floor(n / 5)), 1), 0.25, 'square', 0.05, i * 0.06);
   }
   kill(size: string, combo: number) {
-    if (!this.limited('kill', 0.03)) return;
+    if (size === 'mite' ? !this.limited('mite', 0.06) : !this.limited('kill', 0.035)) return;
+    if (size === 'champion' || size === 'boss') { this.boom(true); this.tone(penta(0, 1), 1.2, 'sawtooth', 0.12, 0, undefined, penta(-10, 0)); }
     const step = 5 + (combo % 10);
     this.tone(penta(step, size === 'small' ? 2 : 1), 0.14, 'sine', 0.18);
     this.noise(0.08, 0.12, 2400, 1, 0, 'bandpass');
@@ -123,8 +124,8 @@ export class AudioEngine {
     if (!this.limited(kind, gaps[kind] ?? 0.1)) return;
     const r = Math.floor(Math.random() * 5);
     switch (kind) {
-      case 'bullet': this.tone(penta(r + 10, 1), 0.05, 'square', 0.04); break;
-      case 'hitscan': this.noise(0.12, 0.2, 3000, 2, 0, 'highpass'); this.tone(penta(r + 5, 1), 0.1, 'sawtooth', 0.05); break;
+      case 'bullet': this.noise(0.06, 0.16, 2600, 0.9); this.tone(160, 0.06, 'sine', 0.14, 0, undefined, 70); if (Math.random() < 0.35) this.tink(0.25 + Math.random() * 0.2); break;
+      case 'hitscan': this.noise(0.22, 0.3, 1800, 0.7); this.tone(110, 0.18, 'sine', 0.3, 0, undefined, 45); this.noise(0.4, 0.06, 600, 0.5, 0.05); this.tink(0.4); break;
       case 'lob': case 'puddle': this.tone(penta(r, 1), 0.18, 'sine', 0.12, 0, undefined, penta(r, 0)); break;
       case 'homing': this.noise(0.25, 0.08, 900, 1); break;
       case 'pierce': this.tone(penta(r + 8, 1), 0.2, 'sawtooth', 0.05, 0, undefined, penta(r + 3, 1)); break;
@@ -137,12 +138,23 @@ export class AudioEngine {
   boom(big = false) { if (!this.limited('boom', 0.06)) return; this.tone(big ? 70 : 110, 0.3, 'sine', 0.35, 0, undefined, 35); this.noise(big ? 0.5 : 0.25, 0.3, big ? 500 : 900); }
   leak() { this.tone(penta(-5, 0), 0.5, 'sawtooth', 0.12, 0, undefined, penta(-10, 0)); this.noise(0.3, 0.2, 300); }
   reject() { this.tone(penta(0, 0), 0.08, 'square', 0.06); this.tone(penta(-1, 0), 0.1, 'square', 0.06, 0.07); }
-  seal() { this.tone(penta(2, 1), 0.2, 'triangle', 0.15); this.noise(0.15, 0.1, 1500, 1); }
+  tink(when = 0) { this.tone(penta(14 + Math.floor(Math.random() * 3), 1), 0.05, 'triangle', 0.04, when); this.tone(penta(16, 1), 0.04, 'sine', 0.025, when + 0.09); }
+  thunder() {
+    this.noise(0.08, 0.5, 6000, 0.5, 0, 'highpass');
+    this.noise(2.2, 0.55, 220, 0.6, 0.05);
+    this.noise(1.6, 0.3, 500, 0.8, 0.25);
+    this.tone(55, 1.4, 'sine', 0.4, 0.05, undefined, 30);
+  }
+  crackle() { if (this.limited('crackle', 0.07)) this.noise(0.05, 0.08, 4500 + Math.random() * 2000, 4, 0, 'bandpass'); }
+  roar() { this.tone(penta(-8, 0), 1.1, 'sawtooth', 0.14, 0, undefined, penta(-12, 0)); this.tone(penta(-6, 0), 1.0, 'square', 0.05, 0.05, undefined, penta(-11, 0)); this.noise(0.9, 0.18, 400, 0.6); }
+  loot() { [0, 2, 4, 5, 7, 9, 10].forEach((st, i) => { this.tone(penta(st + 9, 1), 0.2, 'triangle', 0.1, i * 0.045); if (i % 2) this.tink(i * 0.05 + 0.02); }); }
+  undoSnd() { this.tone(penta(9, 1), 0.12, 'sine', 0.12, 0, undefined, penta(4, 1)); }
+  summon() { if (this.limited('summon', 0.3)) this.tone(penta(3, 1), 0.4, 'triangle', 0.08, 0, undefined, penta(8, 1)); }
+  discover() { [0, 4, 7].forEach((st, i) => this.tone(penta(st + 7, 1), 0.5, 'sine', 0.09, i * 0.08)); }
   ui() { this.tone(penta(7, 2), 0.05, 'sine', 0.08); }
   coin() { this.tone(penta(9, 2), 0.08, 'triangle', 0.1); this.tone(penta(11, 2), 0.12, 'triangle', 0.1, 0.06); }
   fanfare() { [0, 2, 4, 5, 7, 9].forEach((s, i) => this.tone(penta(s + 5, 1), 0.5, 'triangle', 0.14, i * 0.09)); }
   build() { [0, 2, 4].forEach((s, i) => this.tone(penta(s + 3, 1), 1.2, 'sine', 0.14, i * 0.02)); }
-  revealCrackle() { if (this.limited('crackle', 0.05)) this.noise(0.05, 0.05, 5000, 4, 0, 'bandpass'); }
 
   // ------------------------------------------------------------ music
   setPhase(p: Phase) {
@@ -228,8 +240,14 @@ export class AudioEngine {
         case 'kill': this.kill(e.size, 0); break;
         case 'combo': this.arpeggio(e.n); break;
         case 'leak': this.leak(); break;
-        case 'reject': case 'sealReject': this.reject(); break;
-        case 'seal': this.seal(); break;
+        case 'reject': this.reject(); break;
+        case 'strike': this.thunder(); break;
+        case 'destroyed': this.boom(true); break;
+        case 'undo': this.undoSnd(); break;
+        case 'champion': this.roar(); break;
+        case 'loot': this.loot(); break;
+        case 'summon': this.summon(); break;
+        case 'discover': this.discover(); break;
         case 'phase': this.setPhase(e.phase); if (e.phase === 'cleared' || e.phase === 'victory') this.fanfare(); break;
         case 'early': case 'recycle': case 'ore': this.coin(); break;
         case 'build': this.build(); break;

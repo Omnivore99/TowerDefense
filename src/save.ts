@@ -1,15 +1,14 @@
 // localStorage persistence. Every call is wrapped: storage may be missing or blocked.
 import type { ModeId, TowerType } from './balance';
-import type { BaseState } from './sim/base';
-import type { BoardMetrics, Settings } from './sim/game';
+import type { BoardMetrics, RunSnapshot, Settings } from './sim/game';
 
-const RUN_KEY = 'satisfying-td:run:v1';
+const RUN_KEY = 'satisfying-td:run:v2';
 const SETTINGS_KEY = 'satisfying-td:settings:v1';
 const METRICS_KEY = 'satisfying-td:metrics:v1';
 const META_KEY = 'satisfying-td:meta:v1';
 
-export interface RunSave { seed: number; mode: ModeId; board: number; base: BaseState; discovered: TowerType[]; savedAt: number }
-export interface Meta { tutorialDone: boolean; discovered: TowerType[] }
+export interface RunSave { v: 2; seed: number; mode: ModeId; board: number; snapshot: RunSnapshot; discovered: TowerType[]; elements: string[]; savedAt: number }
+export interface Meta { tutorialDone: boolean; discovered: TowerType[]; elements?: string[] }
 
 function read<T>(k: string): T | null {
   try {
@@ -27,7 +26,7 @@ function write(k: string, v: unknown) {
   }
 }
 
-export const loadRun = () => read<RunSave>(RUN_KEY);
+export const loadRun = () => { const r = read<RunSave>(RUN_KEY); return r && r.v === 2 && r.snapshot ? r : null; };
 export const saveRun = (r: RunSave) => write(RUN_KEY, r);
 export const clearRun = () => {
   try { localStorage.removeItem(RUN_KEY); } catch { /* ignore */ }

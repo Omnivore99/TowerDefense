@@ -1,14 +1,15 @@
 // DOM HUD, menus, base screen and all input handling.
 import {
-  BASE_INTEGRITY, BASE_SQUARES, BUILDINGS, BUILDING_FX, EARLY_CALL_BONUS, EARLY_CALL_WINDOW, HARMONY, MACRO, MACRO_H, MACRO_W,
-  MODES, SIZES, TOWERS, TOWER_TYPES, type BuildingId, type ModeId, type TowerType,
+  BASE_INTEGRITY, BASE_SQUARES, BUILDINGS, BUILDING_FX, EARLY_CALL_BONUS, EARLY_CALL_WINDOW, GROUPS, HARMONY,
+  MODES, SIZES, TOWERS, TOWER_TYPES, UNDO_SECONDS, type BuildingId, type Group, type ModeId, type TowerType,
 } from '../balance';
 import type { AudioEngine } from '../audio/audio';
 import { PIECE_CSS, hexCss, suitColor } from '../render/palette';
 import type { Renderer } from '../render/renderer';
 import { buildingMult, canBuild, goldenBase, hasBuilding, isHarmony } from '../sim/base';
 import type { Game, GameEvent, Settings, Source } from '../sim/game';
-import { cellIdx, inGrid, mid } from '../sim/map';
+import { cellIdx, inGrid } from '../sim/map';
+import { BASE_DEFS, buildingArt } from './baseArt';
 import { FAMILIES, GLYPH_LABEL, type Family, type Orient } from '../sim/pieces';
 import { allRecipes } from '../sim/towers';
 import { SUIT_SYMBOL, type Suit } from '../sim/waves';
@@ -36,7 +37,8 @@ export class UI {
   modal: string | null = null;
   paused = false;
   private pointer = { sx: 0, sy: 0, over: false, cx: -1, cy: -1, fx: 0, fy: 0 };
-  private press: { kind: 'slot' | 'canvas'; x: number; y: number; id: number; moved: boolean; button: number } | null = null;
+  private press: { kind: 'slot' | 'canvas'; x: number; y: number; id: number; moved: boolean; button: number; pan: boolean; lx: number; ly: number } | null = null;
+  private toasts: { el: HTMLElement; t: number }[] = [];
   private touches = new Set<number>();
   private sigs: Record<string, string> = {};
   private bannerT = 0;
@@ -75,6 +77,7 @@ export class UI {
         <div class="spacer"></div>
         <button id="btnSpeed" title="Game speed">1×</button>
         <button id="btnBook" title="Recipe book (B)">Recipes</button>
+        <button id="btnElem" title="Bestiary: the periodic table of monsters (E)">Bestiary</button>
         <button id="btnPause" title="Pause (P)">❚❚</button>
       </div>
       <div id="left" class="panel">
@@ -86,17 +89,19 @@ export class UI {
         <div class="qhead">HOLD <span class="key">H</span></div>
         <div class="slots" id="hold"></div>
         <div id="extras"></div>
-        <div class="keys">R / wheel / right-click rotate<br>F mirror · Space drop · Esc cancel</div>
+        <div class="keys">R / right-click rotate · F mirror<br>Wheel zoom · drag to pan<br>Esc undo (${UNDO_SECONDS}s) / cancel</div>
       </div>
       <div id="card" class="panel hidden"></div>
       <div id="tooltip" class="hidden"></div>
       <div id="readyWrap" class="hidden"><button id="btnReady"><span id="readyText">Ready ▶</span><span id="readyBonus"></span></button></div>
-      <div id="revealPanel" class="panel hidden"></div>
+      <div id="bossBar" class="hidden"><div class="bb-name" id="bbName"></div><div class="bb-track"><div class="bb-fill" id="bbFill"></div><div class="bb-shield" id="bbShield"></div></div></div>
+      <div id="toasts"></div>
       <div id="tutorial" class="panel hidden"></div>
       <div id="banner"></div>
       <div id="modal" class="hidden"><div class="modal-box" id="modalBox"></div></div>`;
     $(this.root, '#btnPause').onclick = () => this.openPause();
     $(this.root, '#btnBook').onclick = () => this.openBook();
+    $(this.root, '#btnElem').onclick = () => this.openBestiary();
     $(this.root, '#btnSpeed').onclick = () => {
       this.settings.speed = this.settings.speed === 1 ? 2 : this.settings.speed === 2 ? 3 : 1;
       this.shell.settingsChanged();
@@ -108,7 +113,7 @@ export class UI {
   update(dt: number) {
     const g = this.game;
     this.setText('#boardLabel', `Board ${g.boardNo}`);
-    const phaseTxt = g.phase === 'wave' ? ` · Wave ${g.waveIndex} of ${g.wavesInBoard}` : g.phase === 'calm' ? (g.waveIndex === 0 ? ' · Build' : ` · Calm · ${g.waveIndex}/${g.wavesInBoard} waves`) : g.phase === 'reveal' ? ' · The road grows' : '';
+    const phaseTxt = g.phase === 'wave' ? ` · Wave ${g.waveIndex} of ${g.wavesInBoard}` : g.phase === 'calm' ? (g.waveIndex === 0 ? ' · Build' : ` · Calm · ${g.waveIndex}/${g.wavesInBoard} waves`) : g.phase === 'reveal' ? ' · Lightning strikes a new road' : '';
     this.setText('#phaseLabel', phaseTxt);
     this.setText('#essence', String(Math.floor(g.base.essence)));
     this.setText('#ore', String(Math.floor(g.base.ore)));
@@ -118,7 +123,10 @@ export class UI {
     this.updateQueues();
     this.updateExtras();
     this.updateReady();
-    this.updateReveal();
+    this.updateBossBar();
+    this.updateToasts(dt);
+    const ul = g.undoLeft();
+    this.renderer.undoMark = ul > 0 && g.lastPlace ? { cells: g.lastPlace.cells, frac: ul / UNDO_SECONDS } : null;
     this.updateTutorial();
     this.updateCard();
     this.updateTooltip(dt);
@@ -159,14 +167,19 @@ export class UI {
     if (!this.sig('next', key)) return;
     const el = $(this.root, '#nextWave');
     if (!w) { el.innerHTML = ''; return; }
-    const c = { small: 0, medium: 0, large: 0, giant: 0, boss: 0 } as Record<string, number>;
+    const c = { mite: 0, small: 0, medium: 0, large: 0, giant: 0, champion: 0, boss: 0 } as Record<string, number>;
     let balloons = 0;
-    for (const e of w.enemies) { c[e.size]++; if (e.arch === 'balloon') balloons++; }
-    const parts = [`${c.small} S`, `${c.medium} M`, `${c.large} L`];
+    const groups = new Map<Group, string>();
+    for (const e of w.enemies) { c[e.size]++; if (e.arch === 'balloon') balloons++; if (e.group !== 'nonmetal') groups.set(e.group, e.element); }
+    const parts: string[] = [];
+    if (c.mite) parts.push(`${c.mite} swarm`);
+    parts.push(`${c.small} S`, `${c.medium} M`, `${c.large} L`);
     if (c.giant) parts.push(`${c.giant} Giant`);
-    if (c.boss) parts.push('BOSS');
+    if (c.champion) parts.push('<b class="champ">SUB-BOSS</b>');
+    if (c.boss) parts.push('<b class="champ">BOSS</b>');
     if (balloons) parts.push(`${balloons} Balloon`);
-    el.innerHTML = `<span class="lbl">${g.phase === 'wave' ? 'Now' : 'Next'}</span> ${parts.join(' · ')} <span class="suit" style="color:${SUIT_CSS(w.dominant)}" title="Dominant suit: ${w.dominant}. Weak to ${weakTo(w.dominant)}">${SUIT_SYMBOL[w.dominant]}</span>`;
+    const chips = [...groups].map(([gr, el]) => `<span class="elchip" style="--c:${hexCss(GROUPS[gr].color)}" title="${esc(GROUPS[gr].name)}: ${esc(GROUPS[gr].ability)}">${esc(el)}</span>`).join('');
+    el.innerHTML = `<span class="lbl">${g.phase === 'wave' ? 'Now' : 'Next'}</span> ${parts.join(' · ')} ${chips} <span class="suit" style="color:${SUIT_CSS(w.dominant)}" title="Dominant suit: ${w.dominant}. Weak to ${weakTo(w.dominant)}">${SUIT_SYMBOL[w.dominant]}</span>`;
   }
 
   private updateQueues() {
@@ -240,17 +253,35 @@ export class UI {
     $(this.root, '#btnReady').classList.toggle('pulse', g.isTutorial && g.tutorial?.step === 3);
   }
 
-  private updateReveal() {
+  private updateBossBar() {
     const g = this.game;
-    const el = $(this.root, '#revealPanel');
-    const show = g.phase === 'reveal' && g.revealPaused;
-    el.classList.toggle('hidden', !show);
-    if (!show) return;
-    if (!this.sig('reveal', `${g.sealsLeft}`)) return;
-    el.innerHTML = `<div class="rv-text"><span class="rv-title">The road pauses.</span> Click square edges ahead of it to place <b style="color:#ff9a5c">seals</b> (${g.sealsLeft} left); the road bends around them.
-      <div class="rv-dim">Dominant suit <b style="color:${SUIT_CSS(g.dominant)}">${SUIT_SYMBOL[g.dominant]} ${g.dominant}</b>, weak to <b style="color:${PIECE_CSS[weakTo(g.dominant)]}">${weakTo(g.dominant)}</b> towers.</div></div>
-      <button id="btnContinue" class="primary">Continue ▶</button>`;
-    ($(el, '#btnContinue') as HTMLButtonElement).onclick = () => { g.continueReveal(); this.renderer.hoverEdge = null; };
+    const boss = g.enemies.find((e) => e.boss) ?? g.enemies.find((e) => e.champion);
+    const el = $(this.root, '#bossBar');
+    el.classList.toggle('hidden', !boss);
+    if (!boss) return;
+    const gr = GROUPS[boss.group];
+    this.setText('#bbName', `${boss.boss ? 'BOSS' : 'Sub-boss'} · ${boss.element} ${gr.name}${boss.group !== 'nonmetal' ? ` · ${gr.ability}` : ''}`);
+    ($(this.root, '#bbFill')).style.width = `${Math.max(0, (boss.hp / boss.maxHp) * 100).toFixed(1)}%`;
+    ($(this.root, '#bbShield')).style.width = `${Math.min(100, (boss.shield / boss.maxHp) * 100).toFixed(1)}%`;
+  }
+
+  toast(html: string, color = '#ffe08a', time = 3.2) {
+    const box = $(this.root, '#toasts');
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.style.setProperty('--c', color);
+    el.innerHTML = html;
+    box.appendChild(el);
+    this.toasts.push({ el, t: time });
+    while (this.toasts.length > 4) this.toasts.shift()!.el.remove();
+  }
+  private updateToasts(dt: number) {
+    for (const t of this.toasts) {
+      t.t -= dt;
+      if (t.t < 0.4) t.el.classList.add('out');
+      if (t.t <= 0) t.el.remove();
+    }
+    this.toasts = this.toasts.filter((t) => t.t > 0);
   }
 
   private updateTutorial() {
@@ -345,7 +376,15 @@ export class UI {
           if (e.phase === 'calm' && g.waveIndex > 0) this.banner('Calm', 'Build freely. Pieces arrive only during waves.', 1.4);
           break;
         case 'waveStart': this.banner(`Wave ${e.index} of ${g.wavesInBoard}`, '', 1.2); break;
-        case 'revealPause': this.sigs.reveal = ''; break;
+        case 'discover': {
+          const gr = GROUPS[e.group];
+          this.toast(`<span class="tk">${esc(e.element)}</span><div><b>New element: ${esc(e.element)}</b><br><span>${esc(gr.name)}${e.group !== 'nonmetal' ? ` · ${esc(gr.ability)}` : ''}</span></div>`, hexCss(gr.color));
+          break;
+        }
+        case 'champion': this.banner(e.boss ? 'The Boss arrives' : 'A sub-boss approaches', e.boss ? '' : 'It summons swarms. Kill it for loot.', 1.8); break;
+        case 'loot': this.toast(`<span class="tk">★</span><div><b>Loot!</b><br><span>+${e.essence} ◆ · +${e.ore} ⬢${e.golden ? ' · a golden piece' : ''}</span></div>`); break;
+        case 'strike': if (e.destroys > 0) this.toast(`<span class="tk">⚡</span><div><b>The bolt was forced through</b><br><span>${e.destroys} blocking piece${e.destroys > 1 ? 's' : ''} will return to your tray</span></div>`, '#bfe8ff'); break;
+        case 'undo': this.tipMsg = { text: 'Undone', t: 0.8 }; break;
         case 'reject': this.tipMsg = { text: e.reason, t: 1.2 }; break;
         case 'piece':
           if (e.zone === 'must' && (!this.selected || this.selected.zone !== 'must') && g.canPlacePieces() && !this.modal) {
@@ -372,8 +411,11 @@ export class UI {
     window.addEventListener('pointercancel', (e) => { this.touches.delete(e.pointerId); this.press = null; });
     cv.addEventListener('wheel', (e) => {
       e.preventDefault();
-      if (e.ctrlKey || e.metaKey) this.zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15);
-      else if (this.selected) this.rotate(e.deltaY > 0 ? 1 : -1);
+      const r = cv.getBoundingClientRect();
+      const k = Math.exp(-Math.max(-120, Math.min(120, e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY)) * 0.0022);
+      this.renderer.zoomAt(e.clientX - r.left, e.clientY - r.top, k);
+      this.updatePointer(e as unknown as PointerEvent);
+      this.refreshGhost();
     }, { passive: false });
     window.addEventListener('keydown', (e) => this.key(e));
   }
@@ -390,7 +432,7 @@ export class UI {
     this.selected = { zone, index };
     this.renderer.selectedTower = 0;
     this.audio.ui();
-    this.press = { kind: 'slot', x: e.clientX, y: e.clientY, id: e.pointerId, moved: false, button: 0 };
+    this.press = { kind: 'slot', x: e.clientX, y: e.clientY, id: e.pointerId, moved: false, button: 0, pan: false, lx: e.clientX, ly: e.clientY };
     this.refreshGhost();
   }
 
@@ -402,15 +444,21 @@ export class UI {
     }
     this.updatePointer(e);
     if (e.button === 2) { if (this.selected) this.rotate(1); return; }
-    if (e.button === 1) return;
-    this.press = { kind: 'canvas', x: e.clientX, y: e.clientY, id: e.pointerId, moved: false, button: e.button };
+    // middle button always pans; left-drag pans when nothing is selected
+    const pan = e.button === 1 || (!this.selected && !this.smiteMode);
+    if (e.button === 1) e.preventDefault();
+    this.press = { kind: 'canvas', x: e.clientX, y: e.clientY, id: e.pointerId, moved: false, button: e.button, pan, lx: e.clientX, ly: e.clientY };
   }
 
   private move(e: PointerEvent) {
     this.updatePointer(e);
-    if (this.press && Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) > 8) this.press.moved = true;
-    const g = this.game;
-    if (g.phase === 'reveal' && g.revealPaused) this.renderer.hoverEdge = this.pointer.over ? this.edgeAt(this.pointer.fx, this.pointer.fy) : null;
+    const pr = this.press;
+    if (pr && Math.hypot(e.clientX - pr.x, e.clientY - pr.y) > 8) pr.moved = true;
+    if (pr && pr.kind === 'canvas' && pr.pan && pr.moved && this.touches.size < 2) {
+      this.renderer.panBy(e.clientX - pr.lx, e.clientY - pr.ly);
+      this.canvas.style.cursor = 'grabbing';
+    }
+    if (pr) { pr.lx = e.clientX; pr.ly = e.clientY; }
     if (this.smiteMode) this.renderer.smiteAim = this.pointer.over ? { x: this.pointer.fx, y: this.pointer.fy, r: BUILDING_FX.smiteRadius } : null;
     else this.renderer.smiteAim = null;
     this.refreshGhost();
@@ -421,8 +469,11 @@ export class UI {
     const p = this.press;
     this.press = null;
     if (!p || p.id !== e.pointerId) return;
+    this.canvas.style.cursor = '';
     this.updatePointer(e);
     const g = this.game;
+    if (p.kind === 'canvas' && p.pan && p.moved) return;
+    if (p.kind === 'canvas' && p.button === 1) return;
     if (p.kind === 'slot') {
       if (p.moved && this.pointer.over && this.selected) this.tryPlace();
       return;
@@ -431,11 +482,6 @@ export class UI {
     if (this.smiteMode) {
       if (g.smite(this.pointer.fx, this.pointer.fy)) this.smiteMode = false;
       this.renderer.smiteAim = null;
-      return;
-    }
-    if (g.phase === 'reveal' && g.revealPaused) {
-      const edge = this.edgeAt(this.pointer.fx, this.pointer.fy);
-      if (edge) g.placeSeal(edge[0], edge[1]);
       return;
     }
     if (this.selected && g.canPlacePieces()) {
@@ -461,20 +507,6 @@ export class UI {
     this.pointer.fy = w.y;
     this.pointer.cx = Math.floor(w.x);
     this.pointer.cy = Math.floor(w.y);
-  }
-
-  private edgeAt(fx: number, fy: number): [number, number] | null {
-    const mx = Math.floor(fx / MACRO), my = Math.floor(fy / MACRO);
-    if (mx < 0 || my < 0 || mx >= MACRO_W || my >= MACRO_H) return null;
-    const lx = fx / MACRO - mx, ly = fy / MACRO - my;
-    const cands: [number, number, number][] = [];
-    if (mx > 0) cands.push([lx, mid(mx - 1, my), mid(mx, my)]);
-    if (mx < MACRO_W - 1) cands.push([1 - lx, mid(mx, my), mid(mx + 1, my)]);
-    if (my > 0) cands.push([ly, mid(mx, my - 1), mid(mx, my)]);
-    if (my < MACRO_H - 1) cands.push([1 - ly, mid(mx, my), mid(mx, my + 1)]);
-    cands.sort((a, b) => a[0] - b[0]);
-    if (!cands.length || cands[0][0] > 0.3) return null;
-    return [cands[0][1], cands[0][2]];
   }
 
   private tryPlace() {
@@ -510,7 +542,9 @@ export class UI {
   }
 
   private zoomBy(k: number) {
-    this.renderer.zoom = Math.max(1, Math.min(2.6, this.renderer.zoom * k));
+    const r = this.canvas.getBoundingClientRect();
+    const px = this.pointer.over ? this.pointer.sx - r.left : r.width / 2, py = this.pointer.over ? this.pointer.sy - r.top : r.height / 2;
+    this.renderer.zoomAt(px, py, k);
   }
 
   private key(e: KeyboardEvent) {
@@ -519,8 +553,8 @@ export class UI {
     const g = this.game;
     const k = e.key.toLowerCase();
     if (this.modal) {
-      if (k === 'escape' || (k === 'p' && this.modal === 'pause') || (k === 'b' && this.modal === 'book')) {
-        if (this.modal === 'pause' || this.modal === 'book') this.closeModal();
+      if (k === 'escape' || (k === 'p' && this.modal === 'pause') || (k === 'b' && this.modal === 'book') || (k === 'e' && this.modal === 'elements')) {
+        if (this.modal === 'pause' || this.modal === 'book' || this.modal === 'elements') this.closeModal();
       }
       return;
     }
@@ -536,13 +570,16 @@ export class UI {
         } else this.flashTip(g.holdLocked ? 'Hold is used: place a piece first' : 'Select a piece to hold');
         break;
       case 'escape':
-        if (this.smiteMode) { this.smiteMode = false; this.renderer.smiteAim = null; }
+        if (g.undoLeft() > 0 && g.undo()) { this.audio.ui(); this.refreshGhost(); }
+        else if (this.smiteMode) { this.smiteMode = false; this.renderer.smiteAim = null; }
         else if (this.selected) { this.selected = null; this.refreshGhost(); }
         else if (this.renderer.selectedTower) this.renderer.selectedTower = 0;
         else this.openPause();
         break;
       case 'p': this.openPause(); break;
       case 'b': this.openBook(); break;
+      case 'e': this.openBestiary(); break;
+      case 'z': if (e.ctrlKey || e.metaKey) { if (g.undo()) this.refreshGhost(); } break;
       case 'enter': g.ready(); break;
       case '1': case '2': case '3': case '4': {
         const i = Number(k) - 1;
@@ -552,10 +589,11 @@ export class UI {
       }
       case '+': case '=': this.zoomBy(1.2); break;
       case '-': case '_': this.zoomBy(1 / 1.2); break;
-      case 'arrowleft': case 'a': this.renderer.pan.x += 40; break;
-      case 'arrowright': case 'd': this.renderer.pan.x -= 40; break;
-      case 'arrowup': case 'w': this.renderer.pan.y += 40; break;
-      case 'arrowdown': case 's': this.renderer.pan.y -= 40; break;
+      case 'arrowleft': case 'a': this.renderer.panBy(60, 0); break;
+      case 'arrowright': case 'd': this.renderer.panBy(-60, 0); break;
+      case 'arrowup': case 'w': this.renderer.panBy(0, 60); break;
+      case 'arrowdown': case 's': this.renderer.panBy(0, -60); break;
+      case '0': this.renderer.zoom = 1; this.renderer.pan = { x: 0, y: 0 }; break;
     }
   }
 
@@ -568,7 +606,7 @@ export class UI {
     box.className = `modal-box ${cls}`;
     box.innerHTML = html;
     this.renderer.ghost = null;
-    this.paused = name === 'pause' || name === 'book';
+    this.paused = name === 'pause' || name === 'book' || name === 'elements';
     return box;
   }
   closeModal() {
@@ -610,7 +648,7 @@ export class UI {
   openNewRun() {
     const box = this.openModal('newrun', `
       <h2>New run</h2>
-      <p>Seven boards. Your base persists; towers reset each board.</p>
+      <p>Seven boards on one growing map. Your towers and base persist; each board, lightning strikes a new road that joins the old ones.</p>
       ${modeButtons(this.game.mode)}
       <div class="opt"><span>Seed (optional)</span><input id="seedIn" placeholder="random" inputmode="numeric"></div>
       <div class="row"><button id="back">Back</button></div>`);
@@ -641,6 +679,31 @@ export class UI {
       <div class="rb-grid">${cards}</div>
       <div class="row"><button id="closeBook" class="primary">Close</button></div>`, 'wide');
     ($(box, '#closeBook') as HTMLButtonElement).onclick = () => this.closeModal();
+  }
+
+  openBestiary() {
+    const g = this.game;
+    const groups = (Object.keys(GROUPS) as Group[]);
+    const cols = groups.map((gr) => {
+      const d = GROUPS[gr];
+      const cells = d.symbols.map((sym) => {
+        const known = g.discoveredElements.has(sym);
+        return `<div class="el ${known ? 'known' : ''}" style="--c:${hexCss(d.color)}" title="${known ? `${sym} · ${esc(d.name)}` : 'Not met yet'}"><b>${known ? esc(sym) : '?'}</b></div>`;
+      }).join('');
+      const met = d.symbols.some((sym) => g.discoveredElements.has(sym));
+      return `<div class="eg" style="--c:${hexCss(d.color)}">
+        <div class="eg-head"><span class="eg-dot"></span>${esc(d.name)} <i>${d.fromBoard > 1 ? `from board ${d.fromBoard}` : ''}</i></div>
+        <div class="eg-cells">${cells}</div>
+        <div class="eg-ab">${met || gr === 'nonmetal' ? `<b>${esc(d.ability)}</b><br><span>Counter: ${esc(d.counter)}</span>` : '<span>Meet one to learn its power.</span>'}</div>
+      </div>`;
+    }).join('');
+    const total = groups.reduce((s, gr) => s + GROUPS[gr].symbols.length, 0);
+    const box = this.openModal('elements', `
+      <h2>Bestiary <small>${g.discoveredElements.size} / ${total} elements met</small></h2>
+      <p class="small">Every monster pack carries an element. Its group grants an ability. Tiers I to IV (shown by plates, horns and crowns) mean more health and more Essence. Sub-bosses summon swarms and drop loot.</p>
+      <div class="ptable">${cols}</div>
+      <div class="row"><button id="closeEl" class="primary">Close</button></div>`, 'wide');
+    ($(box, '#closeEl') as HTMLButtonElement).onclick = () => this.closeModal();
   }
 
   private openCleared() {
@@ -698,16 +761,18 @@ export class UI {
       const fits = sel && !canBuild(b, i, sel);
       return `<g class="sq ${unlocked ? 'open' : 'locked'} ${id ? 'built' : ''} ${isHarmony(b, i) ? 'harmony' : ''} ${fits ? 'fits' : ''} ${i === justBuilt ? 'justbuilt' : ''}" data-sq="${i}">
         <rect x="${s.x + 0.06}" y="${s.y + 0.06}" width="${s.size - 0.12}" height="${s.size - 0.12}" rx="0.12"></rect>
+        ${id ? `<g class="art ${i === justBuilt ? 'rise' : ''}">${buildingArt(id, s.x, s.y, s.size)}</g>` : ''}
         ${i === justBuilt ? scaffold(s.x, s.y, s.size) : ''}</g>`;
     }).join('');
     const labels = BASE_SQUARES.map((s, i) => {
       const unlocked = i < b.unlocked;
       const id = b.buildings[i];
       const name = id ? (s.size >= 3 ? BUILDINGS[id].name : SHORT[id]) : unlocked ? `${s.size}×${s.size}` : 'locked';
-      const fs = Math.min(0.85, (s.size * 0.88) / Math.max(4, name.length * 0.62));
+      const fs = Math.min(id ? 0.55 : 0.85, (s.size * 0.88) / Math.max(4, name.length * 0.62));
       const harm = isHarmony(b, i);
-      return `<text x="${s.x + s.size / 2}" y="${s.y + s.size / 2}" font-size="${fs}" dominant-baseline="middle" text-anchor="middle" class="${unlocked ? '' : 'lockt'}">${esc(name)}</text>
-        ${harm ? `<text x="${s.x + s.size / 2}" y="${s.y + s.size / 2 + fs * 0.95}" font-size="${Math.min(0.4, fs * 0.7)}" text-anchor="middle" dominant-baseline="middle" class="harm">${s.size >= 2 ? 'Harmony' : '★'}</text>` : ''}`;
+      const ty = id ? s.y + s.size - fs * 0.75 : s.y + s.size / 2;
+      return `<text x="${s.x + s.size / 2}" y="${ty}" font-size="${fs}" dominant-baseline="middle" text-anchor="middle" class="${unlocked ? '' : 'lockt'} ${id ? 'blabel' : ''}">${esc(name)}</text>
+        ${harm ? `<text x="${s.x + s.size / 2}" y="${id ? s.y + 0.32 : s.y + s.size / 2 + fs * 0.95}" font-size="${Math.min(0.4, fs * 0.7)}" text-anchor="middle" dominant-baseline="middle" class="harm">${s.size >= 2 ? 'Harmony' : '★'}</text>` : ''}`;
     }).join('');
     const sq = `${rects}<path class="spiral" d="M 0 8 A 8 8 0 0 1 8 0 A 5 5 0 0 1 13 5 A 3 3 0 0 1 10 8 A 2 2 0 0 1 8 6 A 1 1 0 0 1 9 5 A 1 1 0 0 1 10 6"></path><g class="labels">${labels}</g>`;
     const list = (Object.keys(BUILDINGS) as BuildingId[]).map((id) => {
@@ -724,7 +789,7 @@ export class UI {
       <div class="base-wrap">
         <div class="base-svg">
           <svg viewBox="-0.2 -0.2 13.4 8.4" preserveAspectRatio="xMidYMid meet">
-            ${sq}
+            ${BASE_DEFS}${sq}
           </svg>
           <div class="small">${goldenBase(b) ? '<b class="gold">Golden Base: +8% damage to all towers</b>' : `Fill every square for a Golden Base (+8% damage). A building that exactly fits its square gains Harmony (+${(HARMONY * 100).toFixed(1)}%). ${nextUnlock}`}</div>
         </div>
