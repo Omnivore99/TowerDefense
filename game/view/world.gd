@@ -8,6 +8,20 @@ extends Node3D
 
 const SPEEDS := [0.5, 1.0, 2.0, 3.0]
 const MAX_STEPS_PER_FRAME := 12
+## Cell grid that fades in around the cursor while placing (section 4.3).
+const GRID_SHADER := """
+shader_type spatial;
+render_mode unshaded, blend_add, cull_disabled, depth_draw_never;
+varying vec3 wp;
+void vertex(){ wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; }
+void fragment(){
+	vec2 f = abs(fract(wp.xz) - 0.5);
+	float line = smoothstep(0.47, 0.5, max(f.x, f.y));
+	float fade = 1.0 - smoothstep(1.5, 4.4, length(UV - 0.5) * 9.0);
+	ALBEDO = vec3(1.0, 0.75, 0.4);
+	ALPHA = line * fade * 0.35;
+}
+"""
 
 var g: Game
 var settings: Dictionary
@@ -16,6 +30,8 @@ var terrain: TerrainView
 var cam_rig: CamRig
 var fx: Fx
 var hud: Hud
+var sfx: Sfx
+var shot_sound_t := {}  ## tower id -> last firing sound time (ms)
 var env: Environment
 var sun: DirectionalLight3D
 var core: Node3D
@@ -52,6 +68,8 @@ var pan_drag := false
 var pan_moved := 0.0
 var mouse_pos := Vector2.ZERO
 var bolt_t := 0.0
+var sky_mat: ProceduralSkyMaterial
+var grid: MeshInstance3D
 ## Demo / screenshot mode (user args): --demo [--warp B,W,S] [--cam x,z,dist,yaw] [--shot path.png]
 var demo_bot: Bot
 var shot_path := ""
@@ -82,6 +100,11 @@ func _ready() -> void:
 	add_child(fx)
 	fx.cam = cam_rig.cam
 	fx.ground_y = func(x: float, z: float) -> float: return _ground_y(x, z)
+	sfx = Sfx.new()
+	sfx.name = "Sfx"
+	add_child(sfx)
+	sfx.set_volumes(float(settings.volume), float(settings.music))
+	fx.casing_landed.connect(func(pos: Vector3): sfx.play_at("casing", pos))
 	ghost = Node3D.new()
 	ghost.name = "Ghost"
 	add_child(ghost)
@@ -90,6 +113,18 @@ func _ready() -> void:
 	range_ring.material_override = Kit.unshaded(Color(1.0, 0.75, 0.35, 0.55), true)
 	range_ring.visible = false
 	add_child(range_ring)
+	grid = MeshInstance3D.new()
+	var pm := PlaneMesh.new()
+	pm.size = Vector2(9, 9)
+	grid.mesh = pm
+	var gm := ShaderMaterial.new()
+	var gs := Shader.new()
+	gs.code = GRID_SHADER
+	gm.shader = gs
+	grid.material_override = gm
+	grid.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	grid.visible = false
+	add_child(grid)
 	var layer := CanvasLayer.new()
 	add_child(layer)
 	hud = Hud.new()
@@ -168,7 +203,7 @@ func _root(n: String) -> Node3D:
 # ------------------------------------------------------------------ environment ("dusk fortress")
 func _build_environment() -> void:
 	env = Environment.new()
-	var sky_mat := ProceduralSkyMaterial.new()
+	sky_mat = ProceduralSkyMaterial.new()
 	sky_mat.sky_top_color = Color(0.13, 0.17, 0.27)
 	sky_mat.sky_horizon_color = Color(0.72, 0.52, 0.42)
 	sky_mat.ground_horizon_color = Color(0.32, 0.3, 0.33)
@@ -218,6 +253,17 @@ func _build_environment() -> void:
 
 
 # ------------------------------------------------------------------ the core keep
+## The light moves from dusk on board 1 to night by board 7, so glowing towers matter more.
+func _apply_time_of_day() -> void:
+	var k := clampf((g.board_no - 1) / 6.0, 0.0, 1.0)
+	sun.light_energy = lerpf(1.15, 0.45, k)
+	sun.light_color = Color(1.0, 0.82, 0.66).lerp(Color(0.6, 0.68, 1.0), k)
+	sky_mat.sky_top_color = Color(0.13, 0.17, 0.27).lerp(Color(0.03, 0.04, 0.09), k)
+	sky_mat.sky_horizon_color = Color(0.72, 0.52, 0.42).lerp(Color(0.2, 0.2, 0.32), k)
+	env.ambient_light_energy = lerpf(0.75, 0.45, k)
+	env.ambient_light_color = Color(0.5, 0.55, 0.68).lerp(Color(0.35, 0.4, 0.6), k)
+
+
 func _build_core() -> void:
 	if core != null:
 		core.queue_free()
@@ -253,6 +299,7 @@ func _build_core() -> void:
 	core_glow.position = Vector3(0, 5.6, 0)
 	core.add_child(core_glow)
 	cam_rig.home = Vector3(c.x, 0, c.y)
+	_apply_time_of_day()
 
 
 # ------------------------------------------------------------------ game lifecycle
@@ -354,6 +401,8 @@ func _process(delta: float) -> void:
 	if not hud.has_modal():
 		var wasd := Vector2(float(Input.is_key_pressed(KEY_D)) - float(Input.is_key_pressed(KEY_A)), float(Input.is_key_pressed(KEY_S)) - float(Input.is_key_pressed(KEY_W)))
 		cam_rig.pan_keys(wasd if wasd != Vector2.ZERO else pan, delta)
+	if cam_rig.spectator:
+		cam_rig.spec_focus = _densest_fight()
 	_update_ghost()
 	hud.refresh(g)
 	_update_selected_card()
@@ -386,6 +435,7 @@ func _handle_events(evs: Array) -> void:
 				fx.ribbon(a, b, 0.09, Color(0.7, 0.85, 1.0), 0.16, true, 7)
 				fx.ribbon(a, b, 0.035, Color(1, 1, 1), 0.12, true, 5)
 				fx.burst(b, 5, 3.0, Color(0.7, 0.85, 1.0), 0.06, 0.25)
+				_tower_sound(tower_views.get(e.towerId), "bolt", a)
 			"aura":
 				var tv: TowerView = tower_views.get(e.towerId)
 				if tv != null:
@@ -396,10 +446,12 @@ func _handle_events(evs: Array) -> void:
 				fx.explosion(_w(e.x, e.y, 0.3), r, _glow_of(e.get("color", "red")))
 				fx.decal(_w(e.x, e.y, 0.03), r * 0.8, Color(0.05, 0.04, 0.04, 0.55), 7.0)
 				cam_rig.add_shake(0.12 if not e.get("big", false) else 0.4)
+				sfx.play_at("boom", _w(e.x, e.y, 0.5), -4.0 if r < 2.0 else 0.0)
 			"impact":
 				fx.burst(_w(e.x, e.y, 0.5), 6, 3.5, _glow_of(e.get("color", "gold")), 0.06, 0.3)
 			"puddle":
 				fx.burst(_w(e.x, e.y, 0.3), 10, 2.5, Color(0.6, 1.0, 0.3), 0.1, 0.5, "glob")
+				sfx.play_at("splat", _w(e.x, e.y, 0.3))
 			"hit":
 				if e.get("crit", false):
 					fx.burst(_w(e.x, e.y, 0.8), 8, 4.0, Color(1, 0.95, 0.6), 0.08, 0.35)
@@ -410,9 +462,12 @@ func _handle_events(evs: Array) -> void:
 			"combo":
 				if e.n >= 3:
 					hud.combo(e.n)
+				if e.n in [3, 5, 8, 13, 21]:
+					sfx.play("combo", 0.0, [3, 5, 8, 13, 21].find(e.n))
 			"leak":
 				fx.explosion(_w(e.x, e.y, 0.6), 1.6, Color(1, 0.4, 0.3))
 				cam_rig.add_shake(0.35)
+				sfx.play("leak")
 				hud.toast("The base was hit! −%d" % e.dmg, Color(1, 0.55, 0.45), 1.6)
 			"place":
 				_on_place(e)
@@ -430,6 +485,7 @@ func _handle_events(evs: Array) -> void:
 					fx.ring(_w(t3.cx, t3.cy, 0.1), 0.3, 3.2, 0.6, Color(1, 0.75, 0.35, 0.8))
 					fx.burst(_w(t3.cx, t3.cy, 1.2), 24, 5.0, Color(1, 0.8, 0.4), 0.08, 0.6)
 				hud.toast("%s online" % e.type, Color(1, 0.82, 0.45))
+				sfx.play("activate")
 			"bonus":
 				hud.toast(e.label, Color(0.55, 1.0, 0.7), 2.0)
 			"undo":
@@ -444,15 +500,19 @@ func _handle_events(evs: Array) -> void:
 						tower_views[t.id].rebuild()
 				_sync_road_pieces(true)
 				hud.toast("Undone", Color(0.8, 0.85, 1.0), 1.0)
+				sfx.play("undo")
 			"reject":
 				hud.toast(e.reason, Color(1, 0.6, 0.5), 1.4)
+				sfx.play("reject")
 			"smite":
 				var p := _w(e.x, e.y, 0.0)
 				fx.ribbon(p + Vector3(0, 60, 0), p, 1.2, Color(1, 0.85, 0.5), 0.5)
 				fx.explosion(p + Vector3(0, 0.4, 0), e.r, Color(1, 0.8, 0.4))
 				cam_rig.add_shake(0.8)
+				sfx.play_at("orbital", p)
 			"mine":
 				fx.explosion(_w(e.x, e.y, 0.2), 1.3, Color(1, 0.55, 0.3))
+				sfx.play_at("boom", _w(e.x, e.y, 0.2), -3.0)
 				cam_rig.add_shake(0.15)
 			"barrierBreak":
 				fx.burst(_w(e.x, e.y, 0.6), 18, 4.0, Color(0.55, 0.55, 0.6), 0.12, 0.7, "debris", 10.0)
@@ -467,19 +527,25 @@ func _handle_events(evs: Array) -> void:
 				_on_phase(e.phase)
 			"waveStart":
 				hud.toast("Wave %d" % e.index, Color(1, 0.8, 0.45), 1.6)
+				sfx.play("wave", -4.0)
+				sfx.set_wave(true)
 			"early":
 				hud.toast("Early call: +%d ◆" % int(Bal.EARLY_CALL_BONUS), Color(1, 0.85, 0.45), 1.6)
+				sfx.play("chime")
 			"ore":
 				hud.toast("+%d ore from harvesters" % int(e.amount), Color(0.85, 0.65, 0.4), 1.8)
+				sfx.play("chime")
 			"discover":
 				hud.toast("New element: %s" % e.element, Color(0.7, 0.9, 1.0), 2.0)
 			"loot":
 				fx.burst(_w(e.x, e.y, 0.8), 30, 5.0, Color(1, 0.85, 0.3), 0.1, 0.9)
+				sfx.play("chime", 0.0, 2)
 				hud.toast("Loot: +%d ◆ +%d ore" % [int(e.essence), int(e.ore)], Color(1, 0.85, 0.4))
 			"champion":
 				hud.toast("A champion approaches", Color(1, 0.6, 0.4), 2.0)
 			"build":
 				hud.toast("%s built" % Bal.BUILDINGS[e.id].name, Color(1, 0.82, 0.45))
+				sfx.play("bell")
 			"recycle":
 				hud.toast("+%d ◆" % int(e.essence), Color(1, 0.85, 0.45), 1.0)
 
@@ -501,15 +567,17 @@ func _on_shot(e: Dictionary) -> void:
 	if tv != null:
 		tv.on_fire()
 	var a := _muzzle(e.towerId, e.x1, e.y1)
+	_tower_sound(tv, e.kind, a)
 	var b := _w(e.x2, e.y2, 0.6)
 	var c := _glow_of(e.color)
 	match e.kind:
 		"bullet":
 			fx.burst(a, 3, 2.0, Color(1, 0.8, 0.45), 0.05, 0.08)
-			if tv != null and tv.tower.type == "Machine Gun":
+			if tv != null and tv.tower.type in ["Machine Gun", "Gun"]:
 				var side := Vector3(randf_range(-1, 1), 2.5, randf_range(-1, 1))
 				fx.emit("casing", a - Vector3(0, 0.2, 0), side, 2.5, 1.0, Color.WHITE, 12.0)
 		"hitscan":
+			fx.emit("casing", a - Vector3(0, 0.2, 0), Vector3(randf_range(-1, 1), 3.0, randf_range(-1, 1)), 3.0, 1.6, Color.WHITE, 12.0)
 			fx.ribbon(a, b, 0.05, Color(1, 0.95, 0.75), 0.12)
 			fx.burst(a, 6, 3.0, Color(1, 0.85, 0.5), 0.06, 0.12)
 			fx.burst(b, 6, 3.0, Color(1, 0.85, 0.5), 0.06, 0.25)
@@ -542,6 +610,20 @@ func _on_shot(e: Dictionary) -> void:
 			fx.burst(a, 3, 2.0, c, 0.05, 0.1)
 
 
+func _tower_sound(tv: TowerView, kind: String, at: Vector3) -> void:
+	var type := tv.tower.type if tv != null else ("Gun" if kind == "tank" else "")
+	var snd: String = Sfx.TOWER_SOUND.get(type, "")
+	if snd == "":
+		return
+	var id := tv.tower.id if tv != null else -1
+	var now := Time.get_ticks_msec()
+	var gap := 70 if snd in ["mg", "laser", "flame", "efield"] else 30
+	if now - int(shot_sound_t.get(id, 0)) < gap:
+		return
+	shot_sound_t[id] = now
+	sfx.play_at(snd, at)
+
+
 func _on_kill(e: Dictionary) -> void:
 	var p := _w(e.x, e.y, 0.5)
 	var col := EnemyView.suit_color(e.suit, e.size)
@@ -550,6 +632,7 @@ func _on_kill(e: Dictionary) -> void:
 	fx.burst(p, n, 4.5 if big else 3.5, col, 0.14 if big else 0.1, 0.7, "glob", 9.0)
 	fx.burst(p + Vector3(0, 0.3, 0), 6, 3.0, Color(1, 0.9, 0.6), 0.05, 0.3)
 	fx.decal(_w(e.x, e.y, 0.02), 0.5 if not big else 1.2, Color(col.r * 0.5, col.g * 0.5, col.b * 0.5, 0.55), 5.0)
+	sfx.play_at("kill_big" if big else "kill", p)
 	if big:
 		cam_rig.add_shake(0.25)
 	var ev: EnemyView = enemy_views.get(e.id)
@@ -568,6 +651,7 @@ func _on_place(e: Dictionary) -> void:
 	fx.burst(p, 10, 2.5, col, 0.07, 0.4)
 	fx.smoke(p, 4, Color(0.6, 0.58, 0.55, 0.45), 0.2, 0.8, 0.4)
 	cam_rig.add_nudge(Vector3(0, -0.15, 0))
+	sfx.play_at("place", p, 0.0, 1.0 + 0.1 * (4 - mini(4, e.size)) * 0.5)
 	match e.kind:
 		"tower", "story":
 			var t := g.tower_by_id(e.towerId)
@@ -583,6 +667,8 @@ func _on_place(e: Dictionary) -> void:
 
 
 func _on_phase(p: String) -> void:
+	if p != "wave":
+		sfx.set_wave(false)
 	if demo_bot != null:
 		if p == "reveal":
 			last_revealed = 0
@@ -652,6 +738,7 @@ func _strike(a: Vector2, b: Vector2) -> void:
 	fx.smoke(pb, 8, Color(0.4, 0.42, 0.48, 0.5), 0.5, 1.6, 0.7)
 	fx.decal(pb, 1.4, Color(0.05, 0.05, 0.07, 0.6), 3.0)
 	cam_rig.add_shake(0.25)
+	sfx.play_at("thunder", pb)
 
 
 # ------------------------------------------------------------------ view sync
@@ -848,6 +935,28 @@ func _sync_misc(delta: float) -> void:
 			m2.scale = Vector3(s, 1, s)
 
 
+## The point of the densest fight: the enemy with the most others within 6 cells,
+## leaning toward the ones closest to the core.
+func _densest_fight() -> Vector3:
+	if g.enemies.is_empty():
+		return cam_rig.home
+	var best := g.enemies[0]
+	var best_score := -1.0
+	var step := maxi(1, g.enemies.size() / 24)
+	for i in range(0, g.enemies.size(), step):
+		var e := g.enemies[i]
+		var n := 0.0
+		for j in range(0, g.enemies.size(), step):
+			var o := g.enemies[j]
+			if absf(o.x - e.x) < 6.0 and absf(o.y - e.y) < 6.0:
+				n += 1.0
+		var score := n + 3.0 * e.progress()
+		if score > best_score:
+			best_score = score
+			best = e
+	return Vector3(best.x, 0, best.y)
+
+
 # ------------------------------------------------------------------ placement ghost
 func _cur_piece() -> Variant:
 	if selected.is_empty():
@@ -861,6 +970,9 @@ func _update_ghost() -> void:
 		selected = {}
 	var cell := _cell_under(mouse_pos)
 	hover = cell
+	grid.visible = p != null and playing and cell.x > -100
+	if grid.visible:
+		grid.position = Vector3(cell.x + 0.5, _ground_y(cell.x + 0.5, cell.y + 0.5) + 0.03, cell.y + 0.5)
 	if p == null or not playing or hud.has_modal() or cell.x < -100:
 		ghost.visible = false
 		hud.set_hint("" if p == null else "[color=#8a93a6]Point at the ground to place[/color]")
@@ -963,6 +1075,7 @@ func _cell_under(screen: Vector2) -> Vector2i:
 func select_source(s: Dictionary) -> void:
 	if g.get_piece(s) == null:
 		return
+	sfx.play("click")
 	if s.zone == "may" and g.may_locked():
 		hud.toast("Place your MUST USE pieces first", Color(1, 0.7, 0.5), 1.4)
 		return
@@ -992,6 +1105,7 @@ func discard_selected() -> void:
 
 func call_ready() -> void:
 	if g.phase == "calm":
+		sfx.play("click", 0.0, 2)
 		g.ready()
 
 
@@ -1028,6 +1142,8 @@ func _unhandled_input(ev: InputEvent) -> void:
 			cam_rig.pan(ev.relative)
 			pan_moved += ev.relative.length()
 		return
+	if ev is InputEventMouseButton and cam_rig.spectator and ev.pressed:
+		cam_rig.spectator = false
 	if ev is InputEventMouseButton:
 		mouse_pos = ev.position
 		match ev.button_index:
@@ -1092,6 +1208,8 @@ func _key(k: Key) -> void:
 		if k == KEY_ESCAPE and paused:
 			_resume()
 		return
+	if cam_rig.spectator and k != KEY_V:
+		cam_rig.spectator = false
 	match k:
 		KEY_R:
 			rot = (rot + 1) % 4
@@ -1121,6 +1239,9 @@ func _key(k: Key) -> void:
 			cam_rig.rotate_step(1)
 		KEY_HOME:
 			cam_rig.recentre()
+		KEY_V:
+			cam_rig.spectator = not cam_rig.spectator
+			hud.toast("Spectator camera " + ("on" if cam_rig.spectator else "off"), Color(0.8, 0.85, 1.0), 1.2)
 		KEY_1, KEY_2, KEY_3:
 			select_source({"zone": "must", "index": k - KEY_1})
 		KEY_4, KEY_5, KEY_6, KEY_7:
@@ -1179,6 +1300,7 @@ func _resume() -> void:
 func _settings_screen(from_title: bool) -> void:
 	var vb := hud.open_modal("Settings", "", [["Done", func():
 		SaveIO.save_settings(settings)
+		sfx.set_volumes(float(settings.volume), float(settings.music))
 		cam_rig.reduced_motion = settings.reducedMotion
 		fx.reduced_motion = settings.reducedMotion
 		cam_rig.sensitivity = float(settings.camSensitivity)

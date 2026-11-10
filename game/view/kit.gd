@@ -247,23 +247,26 @@ static func glass(c: Color = Color(1.0, 0.7, 0.35)) -> StandardMaterial3D:
 	return m
 
 
-## Glossy piece block material in a piece colour.
+## Piece block material: glossy, in a deep version of the piece colour so the slate
+## masonry stays dominant and the colour reads mostly as light (seams, trim, footprint).
 static func piece_block(color_id: String, golden: bool = false) -> StandardMaterial3D:
 	var key := "piece_%s_%s" % [color_id, golden]
 	if _mats.has(key):
 		return _mats[key]
 	var m := StandardMaterial3D.new()
 	var c: Color = Bal.PIECE_BODY.get(color_id, Color.GRAY)
+	var slate := Color(0.22, 0.24, 0.29)
+	var body: Color = slate.lerp(c, 0.55).darkened(0.15)
 	if golden:
-		c = Color(1.0, 0.82, 0.3)
-	m.albedo_color = c
-	m.roughness = 0.22
-	m.metallic = 0.15 if not golden else 0.8
+		body = Color(0.95, 0.75, 0.3)
+	m.albedo_color = body
+	m.roughness = 0.32
+	m.metallic = 0.1 if not golden else 0.85
 	m.clearcoat_enabled = true
-	m.clearcoat = 0.6
+	m.clearcoat = 0.5
 	m.emission_enabled = true
 	m.emission = c
-	m.emission_energy_multiplier = 0.12 if not golden else 0.5
+	m.emission_energy_multiplier = 0.06 if not golden else 0.4
 	_mats[key] = m
 	return m
 
