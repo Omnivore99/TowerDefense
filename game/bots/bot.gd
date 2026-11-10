@@ -35,6 +35,8 @@ func act() -> void:
 	var g := game
 	if g.phase == "reveal":
 		return
+	if g.cards.pending:
+		_draw_cards()
 	if g.phase == "cleared":
 		g.enter_base()
 		return
@@ -56,6 +58,7 @@ func act() -> void:
 	_deploy()
 	if g.phase == "calm":
 		_towns()
+		_mount()
 	var src := _next_source()
 	if not src.is_empty():
 		_place_one(src)
@@ -211,6 +214,51 @@ func _place_one(src: Dictionary) -> void:
 
 ## Pop pimples with the Lance: experts wait for ripeness, average bots pop anything worth
 ## at least 60%, novices never pop.
+# ------------------------------------------------------------ cards (M6)
+## Novices flip three; experts gamble on one rare-backed card when there is one, else two.
+func _draw_cards() -> void:
+	var g := game
+	var deal: Array = g.cards.deal
+	var picks: Array = []
+	if skill == "novice":
+		picks = [0, 1, 2]
+	elif skill == "expert":
+		for i in deal.size():
+			if deal[i].rarity == "rare":
+				picks = [i]
+				break
+		if picks.is_empty():
+			var order: Array = range(deal.size())
+			order.sort_custom(func(a, b): return _card_score(deal[a]) > _card_score(deal[b]))
+			picks = order.slice(0, 2)
+	else:
+		picks = [rng.int_range(0, deal.size() - 1)]
+		while picks.size() < 2:
+			var k := rng.int_range(0, deal.size() - 1)
+			if not picks.has(k):
+				picks.append(k)
+	g.cards.take(g, picks)
+
+
+func _card_score(c: Dictionary) -> float:
+	return {"rare": 3.0, "uncommon": 2.0, "common": 1.0}[c.rarity] + (0.5 if c.cat == "attachment" else 0.0)
+
+
+## Mount attachments on the strongest tower with a free slot.
+func _mount() -> void:
+	var g := game
+	while not g.cards.hand.is_empty():
+		var best: SimTower = null
+		for t in g.towers:
+			if t.type == "" or t.base_tower or t.attach.size() >= Cards.free_slots_total(t):
+				continue
+			if best == null or t.stats.dps > best.stats.dps:
+				best = t
+		if best == null:
+			return
+		g.cards.mount(g, 0, best)
+
+
 # ------------------------------------------------------------ towns and units (M5)
 ## Pick the free macro square with the most resource cells nearby (novices take the first legal one).
 func _found_town(src: Dictionary) -> void:

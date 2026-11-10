@@ -41,6 +41,7 @@ var card_btns: HBoxContainer
 var prio_btn: Button
 var setall_btn: Button
 var evolve_btn: Button
+var attach_btn: Button
 var _card_tower := 0
 var _kit_sig := ""
 var unit_box: HFlowContainer
@@ -321,6 +322,11 @@ func _build_card() -> void:
 	evolve_btn.text = "Evolve (U)"
 	evolve_btn.pressed.connect(func(): w.open_evolve())
 	card_btns.add_child(evolve_btn)
+	attach_btn = Button.new()
+	attach_btn.text = "Attach"
+	attach_btn.tooltip_text = "Mount an attachment card on this tower (one per story)"
+	attach_btn.pressed.connect(func(): w.open_attach())
+	card_btns.add_child(attach_btn)
 	card.visible = false
 
 
@@ -546,12 +552,20 @@ func show_tower(t: SimTower, g: Game) -> void:
 		lines.append("\n".join(good))
 	if t.corroded:
 		lines.append("[color=#b6ff5c]Corroded: firing at 70%[/color]")
+	if not t.attach.is_empty() or s.stories > 0:
+		var an: PackedStringArray = []
+		for a in t.attach:
+			an.append("%s ×%d" % [Bal.CARDS[a.id].name, a.m])
+		lines.append("[color=#a8c8ff]Attachments %d/%d[/color]%s" % [t.attach.size(), s.stories, (": " + ", ".join(an)) if not an.is_empty() else ""])
 	card_text.text = "\n".join(lines)
 	card_btns.visible = true
 	prio_btn.text = "◎ " + Bal.PRIORITY_LABEL.get(t.priority, "First")
 	setall_btn.tooltip_text = "Set every %s to %s" % [t.type, Bal.PRIORITY_LABEL.get(t.priority, "First")]
 	evolve_btn.disabled = t.mark >= 4
 	evolve_btn.text = "Evolve (U)" if t.mark < 4 else "Mk IV"
+	attach_btn.visible = not g.cards.hand.is_empty()
+	attach_btn.text = "Attach (%d)" % g.cards.hand.size()
+	attach_btn.disabled = t.attach.size() >= int(s.stories)
 
 
 func hide_card() -> void:
@@ -573,9 +587,13 @@ func open_modal(title: String, body_bb: String, buttons: Array, wide: float = 52
 	dim.color = Color(0.02, 0.03, 0.05, 0.55)
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	modal = PanelContainer.new()
-	modal.set_anchors_preset(Control.PRESET_CENTER)
+	modal.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	modal.custom_minimum_size = Vector2(wide, 0)
 	modal_layer.add_child(modal)
+	var m := modal
+	m.resized.connect(func():
+		if is_instance_valid(m):
+			m.position = (get_viewport_rect().size - m.size) / 2.0)
 	modal.add_child(dim)
 	dim.show_behind_parent = true
 	var vb := VBoxContainer.new()

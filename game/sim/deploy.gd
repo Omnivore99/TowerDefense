@@ -112,7 +112,7 @@ func deploy(g, pool_index: int, x: float, y: float, order: String = "hold") -> D
 
 func _make(g, kind: String, x: float, y: float, route: Route, d: float, order: String) -> Dictionary:
 	var def := unit_def(kind)
-	var hp_mult := 1.0 + (float(Bal.COMMAND_POST.hp) if g.has_building("commandPost") else 0.0)
+	var hp_mult: float = (1.0 + (float(Bal.COMMAND_POST.hp) if g.has_building("commandPost") else 0.0)) * (1.0 + 0.15 * g.cards.f("fieldpromo"))
 	var mx: float = float(def.hp) * float(def.members) * unit_hp(g) * hp_mult
 	var u := {"id": g.next_id, "kind": kind, "x": x, "y": y, "px": x, "py": y, "hp": mx, "max": mx, "order": order, "priority": "first",
 		"cd": 0.3, "ability_cd": 2.0, "alive": true, "life": float(def.get("life", 0.0)), "route": route, "d": d, "dir": route.at(d).z + PI,
@@ -247,7 +247,7 @@ func step(g, dt: float) -> void:
 		if u.cd > 0.0 or tgt == null or float(def.dps) <= 0.0:
 			continue
 		u.cd = INTERVAL
-		var dmg: float = float(def.dps) * members_alive(u) * unit / 10.0 * INTERVAL
+		var dmg: float = float(def.dps) * members_alive(u) * unit / 10.0 * INTERVAL * (1.0 + 0.15 * g.cards.f("fieldpromo"))
 		g.events.append({"t": "shot", "towerId": -u.id, "kind": "unit_" + u.kind, "x1": u.x, "y1": u.y, "x2": tgt.x, "y2": tgt.y, "color": "gold"})
 		if def.has("splash"):
 			var r: float = def.splash
@@ -305,7 +305,7 @@ func _step_drones(g, u: Dictionary, def: Dictionary, dt: float, unit: float) -> 
 	if u.cd <= 0.0 and dist <= float(def.range) + tgt.radius:
 		u.cd = INTERVAL
 		g._slow(tgt, float(def.slow), 0.6)
-		var dmg: float = float(def.dps) * members_alive(u) * unit / 10.0 * INTERVAL
+		var dmg: float = float(def.dps) * members_alive(u) * unit / 10.0 * INTERVAL * (1.0 + 0.15 * g.cards.f("fieldpromo"))
 		g.events.append({"t": "shot", "towerId": -u.id, "kind": "unit_drones", "x1": u.x, "y1": u.y, "x2": tgt.x, "y2": tgt.y, "color": "blue"})
 		g.damage(tgt, dmg, null, {"src": "u%d" % u.id, "unit": true, "single": true})
 

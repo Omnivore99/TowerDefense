@@ -103,7 +103,8 @@ const COMBAT := {
 const MASS_EXP := 0.9
 const TRAITS := {"Hook": 0.08, "Block": 0.08, "Bar": 0.08, "Tee": 0.05, "Skew": 0.08}
 ## v1.1 story: damage x1.272, range +15%. v2.0 section 9.3 raises damage to x1.5 (set in milestone 6).
-const STORY_DAMAGE := 1.272019649514069
+## v2.0 (section 9.3): each story x1.5 damage (v1.1 was x1.272) and +15% range.
+const STORY_DAMAGE := 1.5
 const STORY_RANGE := 0.15
 const RISE_RANGE := 1.0
 const SHAPE := {
@@ -438,3 +439,61 @@ const DISTRICTS := {
 }
 const CHARTER_COSTS: Array = [{"timber": 21.0, "essence": 13.0}, {"timber": 34.0, "essence": 21.0}, {"timber": 55.0, "essence": 34.0}]
 const COMMAND_POST := {"points": 1, "hp": 0.2}
+
+# ================================================================ v2.0 milestone 6
+# ---------------------------------------------------------------- rogue-lite card draws (section 14) [Default] [Tune]
+## A draw comes after every 4th wave of the run and after each board clear (one draw if both).
+const CARD_DRAW_EVERY := 4
+const CARD_DEAL := 5
+## Flip count -> multiplier: 1 card x4, 2 cards x2, 3 cards x1 (4 flips x1 after Blood Moon).
+const CARD_MULT := {1: 4, 2: 2, 3: 1, 4: 1}
+## Count effects step 1 -> 2 -> 3 at x1 / x2 / x4.
+const CARD_COUNT := {1: 1, 2: 2, 4: 3}
+const CARD_RARITY := {"common": 0.6, "uncommon": 0.3, "rare": 0.1}
+const CARD_PEEK_PEARLS := 1
+const CARD_SHUFFLE_PEARLS := 2
+## v = the x1 value (a fraction, seconds or a count); fmt shows it on the face ({v} = scaled value).
+const CARDS := {
+	# colour cards
+	"wildfire": {"name": "Wildfire", "cat": "colour", "colour": "red", "rarity": "common", "v": 0.12, "fmt": "Red towers: burns +{p} and spread on death"},
+	"forge": {"name": "Forge Heat", "cat": "colour", "colour": "red", "rarity": "common", "v": 0.10, "fmt": "Red towers: +{p} rate of fire"},
+	"midas": {"name": "Midas Touch", "cat": "colour", "colour": "gold", "rarity": "common", "v": 0.15, "fmt": "Gold towers: kills drop +{p} Essence"},
+	"ricochet": {"name": "Ricochet Rounds", "cat": "colour", "colour": "gold", "rarity": "uncommon", "count": true, "fmt": "Gold towers: shots bounce to +{n} targets"},
+	"overgrowth": {"name": "Overgrowth", "cat": "colour", "colour": "green", "rarity": "common", "v": 0.20, "fmt": "Green towers: poison and acid last +{p}, spread +1"},
+	"bramble": {"name": "Bramble Roots", "cat": "colour", "colour": "green", "rarity": "uncommon", "v": 0.15, "fmt": "Green towers: hits root for {s} s"},
+	"deepfreeze": {"name": "Deep Freeze", "cat": "colour", "colour": "blue", "rarity": "common", "v": 0.08, "fmt": "Blue slows +10%; slowed enemies take +{p}"},
+	"tidal": {"name": "Tidal Splash", "cat": "colour", "colour": "blue", "rarity": "common", "v": 0.5, "fmt": "Blue towers: +{c}-cell splash on single hits"},
+	"prism": {"name": "Prism Balance", "cat": "colour", "colour": "pair", "rarity": "uncommon", "v": 0.10, "fmt": "Towers with {pair}: +{p} damage"},
+	# attachments (mounted on a tower, one per story)
+	"scope": {"name": "Scope", "cat": "attachment", "rarity": "common", "v": 0.12, "fmt": "+{p} range, +{p2} crit"},
+	"twin": {"name": "Twin Barrel", "cat": "attachment", "rarity": "uncommon", "count": true, "fmt": "+{n} projectile per shot"},
+	"coolant": {"name": "Coolant Jacket", "cat": "attachment", "rarity": "common", "v": 0.12, "fmt": "+{p} rate of fire"},
+	"tesla": {"name": "Tesla Coil", "cat": "attachment", "rarity": "uncommon", "count": true, "fmt": "hits arc to +{n} nearby enemies"},
+	"dronepod": {"name": "Drone Pod", "cat": "attachment", "rarity": "uncommon", "v": 0.15, "fmt": "a mini drone adds {p} of the tower's DPS"},
+	"gyro": {"name": "Gyro Mount", "cat": "attachment", "rarity": "common", "v": 0.5, "fmt": "+{p} turn rate, +{p3} damage vs Fastest"},
+	"shrapnel": {"name": "Shrapnel Rounds", "cat": "attachment", "rarity": "common", "v": 0.20, "fmt": "kills burst into 3 fragments for {p}"},
+	"afterburn": {"name": "Afterburners", "cat": "attachment", "rarity": "common", "v": 0.30, "fmt": "missiles and rockets +{p} speed"},
+	"splitter": {"name": "Prism Splitter", "cat": "attachment", "rarity": "uncommon", "count": true, "fmt": "beams split into +{n} at 60%"},
+	"spotter": {"name": "Spotter Mast", "cat": "attachment", "rarity": "common", "v": 0.10, "fmt": "reveals cloaked; +{p} vs airborne"},
+	"seismic": {"name": "Seismic Plate", "cat": "attachment", "rarity": "uncommon", "v": 0.2, "fmt": "splash stuns ground enemies {s} s"},
+	"overcharger": {"name": "Overcharger", "cat": "attachment", "rarity": "rare", "v": 0.15, "fmt": "+{p} damage"},
+	# modifiers
+	"chainreaction": {"name": "Chain Reaction", "cat": "modifier", "rarity": "uncommon", "v": 0.08, "fmt": "{p} chance a kill explodes (10% max HP)"},
+	"executioner": {"name": "Executioner", "cat": "modifier", "rarity": "uncommon", "v": 0.06, "fmt": "single hits finish enemies below {p} HP"},
+	"goldenratio": {"name": "Golden Ratio", "cat": "modifier", "rarity": "rare", "count": true, "fmt": "every {every}th shot is a x1.618 crit"},
+	"overkill": {"name": "Overkill Transfer", "cat": "modifier", "rarity": "common", "v": 0.25, "fmt": "{p} of overkill carries to the next enemy"},
+	"coldsnap": {"name": "Cold Snap", "cat": "modifier", "rarity": "common", "v": 0.06, "fmt": "slowed enemies take +{p}"},
+	"tallorder": {"name": "Tall Order", "cat": "modifier", "rarity": "common", "v": 0.04, "fmt": "+{p} damage per story"},
+	"trapsmith": {"name": "Trapsmith", "cat": "modifier", "rarity": "common", "v": 0.15, "fmt": "traps +{p} damage and more spikes"},
+	"lancemastery": {"name": "Lance Mastery", "cat": "modifier", "rarity": "common", "v": 0.10, "fmt": "+{n} Lance charge; pimples +{p} value"},
+	"civicpride": {"name": "Civic Pride", "cat": "modifier", "rarity": "common", "v": 0.15, "fmt": "towns +{p} production and +{hp} HP"},
+	"airsup": {"name": "Air Superiority", "cat": "modifier", "rarity": "common", "v": 0.10, "fmt": "air strike recharges {p} faster"},
+	"artillery": {"name": "Artillery Doctrine", "cat": "modifier", "rarity": "common", "v": 0.12, "fmt": "howitzers +{p} damage, +{p4} blast radius"},
+	"clockwork": {"name": "Clockwork", "cat": "modifier", "rarity": "uncommon", "v": 0.15, "fmt": "metronomes lose amplitude {p} slower"},
+	"fieldpromo": {"name": "Field Promotion", "cat": "modifier", "rarity": "common", "v": 0.15, "fmt": "units +{p} HP and DPS"},
+	"salvage": {"name": "Salvage", "cat": "modifier", "rarity": "common", "v": 0.03, "fmt": "tower kills: {p} chance of 1 Ore"},
+	# gambits (rare, strong, with a drawback that does not scale)
+	"glasscannon": {"name": "Glass Cannon", "cat": "gambit", "rarity": "rare", "v": 0.25, "fmt": "+{p} damage everywhere · −5 base integrity"},
+	"bloodmoon": {"name": "Blood Moon", "cat": "gambit", "rarity": "rare", "v": 0.0, "fmt": "next draw deals 7, 4 flips · next board enemies +15% HP"},
+	"bounty": {"name": "Bounty Contract", "cat": "gambit", "rarity": "rare", "v": 0.40, "fmt": "+{p} Essence from champions and bosses · champions +20% HP"},
+}

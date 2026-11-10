@@ -214,7 +214,7 @@ func place(g, slot: int, rot: int, cx: int, cy: int) -> Dictionary:
 	g.next_id += 1
 	var where: String = Bal.KITS[id].where
 	if where == "road":
-		var tr := {"id": kid, "kind": id, "cells": cells, "x": sx, "y": sy, "hits": int(Bal.TRAP.spikeHits), "armed": true, "dir": _road_dir(g, sx, sy) + PI, "hit_ids": {}, "burn": 0.0}
+		var tr := {"id": kid, "kind": id, "cells": cells, "x": sx, "y": sy, "hits": int(Bal.TRAP.spikeHits) + 8 * g.cards.n("trapsmith"), "armed": true, "dir": _road_dir(g, sx, sy) + PI, "hit_ids": {}, "burn": 0.0}
 		traps.append(tr)
 		for c in cells:
 			trap_at[Board.cell_idx(c.x, c.y)] = kid
@@ -434,11 +434,11 @@ func _step_pads(g, dt: float, wave_on: bool, unit: float) -> void:
 				var dmg: float = Bal.HOWITZER.units * unit * (1.5 if p.cal > 0 else 1.0) * (1.0 + Bal.TECH_PERK_DMG if Evolve.level_of(g.base, "steam") >= 2 else 1.0)
 				var sid: int = g.next_id
 				g.next_id += 1
-				shells.append({"id": sid, "sx": pos.x, "sy": pos.y, "tx": lead.x, "ty": lead.y, "x": pos.x, "y": pos.y, "t": 0.0, "dur": flight, "dmg": dmg, "r": Bal.HOWITZER.radius, "cluster": Evolve.level_of(g.base, "steam") >= 5})
+				shells.append({"id": sid, "sx": pos.x, "sy": pos.y, "tx": lead.x, "ty": lead.y, "x": pos.x, "y": pos.y, "t": 0.0, "dur": flight, "dmg": dmg * (1.0 + 0.12 * g.cards.f("artillery")), "r": Bal.HOWITZER.radius * (1.0 + 0.08 * g.cards.f("artillery")), "cluster": Evolve.level_of(g.base, "steam") >= 5})
 				g.events.append({"t": "howitzer", "pad": i, "x": pos.x, "y": pos.y, "tx": lead.x, "ty": lead.y, "dur": flight, "id": sid})
 			"airstrike":
 				if not p.ready and wave_on:
-					p.charge += dt
+					p.charge += dt * (1.0 + 0.1 * g.cards.f("airsup"))
 					if p.charge >= Bal.AIRSTRIKE.every:
 						p.ready = true
 						g.events.append({"t": "strikeReady", "kind": "airstrike"})
@@ -631,7 +631,7 @@ func _step_metronomes(g, dt: float, unit: float) -> void:
 					e.shield *= 1.0 - Bal.METRONOME.unmakeShield * a
 					e.unmade_t = 3.0
 					e.immune = false
-		m.amp *= Bal.METRONOME.decay
+		m.amp *= 1.0 - (1.0 - Bal.METRONOME.decay) * maxf(0.2, 1.0 - 0.15 * g.cards.f("clockwork"))
 		g.events.append({"t": "tick", "id": m.id, "x": m.x, "y": m.y, "kind": m.kind, "amp": a, "side": m.side})
 
 

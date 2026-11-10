@@ -30,7 +30,11 @@ func by_id(id: int) -> Dictionary:
 
 
 func max_hp(t: Dictionary) -> float:
-	return Bal.TOWN.hp + Bal.TOWN.hpPerLevel * (t.level - 1) + Bal.TOWN.wallsHp * t.districts.count("walls")
+	return Bal.TOWN.hp + Bal.TOWN.hpPerLevel * (t.level - 1) + Bal.TOWN.wallsHp * t.districts.count("walls") + _civic_hp
+
+## Civic Pride card: +13 town HP per multiplier (set by Game from the card state).
+var _civic_hp := 0.0
+var _civic_prod := 0.0
 
 
 func housing(t: Dictionary) -> int:
@@ -294,7 +298,7 @@ func production(g, t: Dictionary) -> Dictionary:
 				n2 += 1
 		if n2 > 0:
 			out.water += 1.0 + n2 / 8.0
-	var mult: float = t.level * (1.0 + Bal.TOWN.granary * t.districts.count("granary"))
+	var mult: float = t.level * (1.0 + Bal.TOWN.granary * t.districts.count("granary")) * (1.0 + _civic_prod)
 	for k in out:
 		out[k] = floorf(out[k] * mult * 10.0) / 10.0
 	t.prod = out

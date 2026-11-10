@@ -70,7 +70,7 @@ func lance_level() -> int:
 
 func lance_charges_max() -> int:
 	var lv := lance_level()
-	return 0 if lv == 0 else Bal.LANCE.charges[lv - 1]
+	return 0 if lv == 0 else Bal.LANCE.charges[lv - 1] + g.cards.n("lancemastery")
 
 
 func pimple_cap() -> int:
@@ -504,7 +504,7 @@ func pop(pimple_id: int) -> Dictionary:
 	g.base.lanceCharges = charges() - 1
 	var st := stage(p)
 	var res := resource_of(p.node)
-	var amount := roundf(base_value(p) * value_frac(p))
+	var amount := roundf(base_value(p) * value_frac(p) * (1.0 + 0.1 * g.cards.f("lancemastery")))
 	var black := st == "turning" and turn(p) >= 1.0
 	g.base[res] = g.base.get(res, 0.0) + amount
 	pimple_income += amount

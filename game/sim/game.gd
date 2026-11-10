@@ -80,6 +80,7 @@ var _tower_index := {}
 var eco: Economy
 var arsenal: Arsenal
 var towns: Towns
+var cards: Cards
 var deploy: Deploy
 ## Walls districts put a small Gun turret at each town gate.
 var gate_turrets: Array[SimTower] = []
@@ -95,6 +96,7 @@ func _init(seed_value: int, mode_id: String = "normal", opts: Dictionary = {}) -
 	arsenal = Arsenal.new()
 	towns = Towns.new()
 	deploy = Deploy.new()
+	cards = Cards.new()
 	tutorial_enabled = opts.get("tutorial", true)
 	tower_at.resize(Bal.GRID_W * Bal.GRID_H)
 	obj_at.resize(Bal.GRID_W * Bal.GRID_H)
@@ -113,7 +115,7 @@ static func new_base() -> Dictionary:
 	for _s in Bal.BASE_SQUARES:
 		b.append("")
 	return {"unlocked": Bal.BASE_START_SQUARES, "buildings": b, "essence": 0.0, "ore": 0.0, "timber": 0.0, "water": 0.0, "pearls": 0, "lanceLevel": 0, "lanceCharges": 0,
-		"tech": {"steam": 0, "aether": 0, "alchemy": 0}, "freeTech": false, "freeTechGiven": false, "researchTech": "", "charterGiven": false}
+		"tech": {"steam": 0, "aether": 0, "alchemy": 0}, "freeTech": false, "freeTechGiven": false, "researchTech": "", "charterGiven": false, "runWaves": 0, "integrityPenalty": 0, "hpBoostBoard": 0}
 
 
 func has_building(id: String) -> bool:
@@ -160,7 +162,7 @@ func snapshot() -> Dictionary:
 	for t in towers:
 		if not t.base_tower:
 			ts.append({"id": t.id, "pieces": t.pieces.duplicate(true), "height": t.height, "kills": t.kills,
-				"mark": t.mark, "branch": t.branch, "priority": t.priority, "prioritySet": t.priority_set})
+				"mark": t.mark, "branch": t.branch, "priority": t.priority, "prioritySet": t.priority_set, "attach": t.attach.duplicate(true)})
 	var rps: Array = []
 	for r in road_pieces:
 		rps.append({"id": r.id, "kind": r.kind, "piece": r.piece.duplicate(), "cells": r.cells.duplicate(), "macro": r.macro, "mines": r.mines.duplicate()})
@@ -179,6 +181,7 @@ func snapshot() -> Dictionary:
 		"arsenal": arsenal.serialize(),
 		"towns": towns.serialize(),
 		"deploy": deploy.serialize(),
+		"cards": cards.serialize(),
 	}
 
 
@@ -204,6 +207,7 @@ func restore(snap: Dictionary) -> void:
 		t.branch = int(o.get("branch", -1))
 		t.priority = o.get("priority", "")
 		t.priority_set = o.get("prioritySet", false)
+		t.attach = o.get("attach", []).duplicate(true)
 		_rebuild_tower(t)
 		if t.type != "":
 			t.active = true
@@ -227,7 +231,10 @@ func restore(snap: Dictionary) -> void:
 	towns.load_data(s.get("towns", {}))
 	deploy = Deploy.new()
 	deploy.load_data(s.get("deploy", {}))
-	for k in ["tech", "freeTech", "freeTechGiven", "researchTech", "charterGiven"]:
+	cards = Cards.new()
+	cards.load_data(s.get("cards", {}))
+	_sync_card_globals()
+	for k in ["tech", "freeTech", "freeTechGiven", "researchTech", "charterGiven", "runWaves", "integrityPenalty", "hpBoostBoard"]:
 		if not base.has(k):
 			base[k] = new_base()[k]
 	harvesters = s.harvesters
@@ -315,7 +322,7 @@ func start_board(b: int) -> void:
 	wave_index = 0
 	wave = {}
 	spawn_queue = []
-	integrity = Bal.BASE_INTEGRITY
+	integrity = Bal.BASE_INTEGRITY - int(base.get("integrityPenalty", 0))
 	buffer = roundi(Bal.BUILDING_FX.blastDoor * building_mult("blastDoor"))
 	combo = {"n": 0, "last": -99.0, "peak": 0}
 	reveal_step = 0.0
@@ -411,7 +418,7 @@ func _finish_reveal() -> void:
 
 
 func ready() -> void:
-	if phase != "calm":
+	if phase != "calm" or cards.pending:
 		return
 	if is_tutorial() and not tutorial.is_empty() and tutorial.step < 3:
 		tutorial.step = 3
@@ -472,6 +479,10 @@ func _end_wave() -> void:
 	puddles.clear()
 	tanks.clear()
 	tutorial = {}
+	base.runWaves = int(base.get("runWaves", 0)) + 1
+	var cleared_now := wave_index >= Bal.WAVES_PER_BOARD[board_no - 1]
+	if cards.want_draw(int(base.runWaves), cleared_now):
+		cards.start_draw(self)
 	if wave_index >= Bal.WAVES_PER_BOARD[board_no - 1]:
 		metrics.cleared = true
 		_finish_metrics()
@@ -500,7 +511,7 @@ func _finish_metrics() -> void:
 
 ## After a cleared board: open the base screen (unlocks the next spiral square).
 func enter_base() -> void:
-	if phase != "cleared":
+	if phase != "cleared" or cards.pending:
 		return
 	base.unlocked = mini(Bal.BASE_SQUARES.size(), maxi(base.unlocked, 2 + board_no))
 	_set_phase("base")
@@ -714,6 +725,7 @@ func _add_tech(tech: String, n: int) -> void:
 
 
 func _rebuild_all() -> void:
+	_sync_card_globals()
 	for t in towers:
 		_rebuild_tower(t)
 
@@ -1079,9 +1091,11 @@ func _rebuild_tower(t: SimTower) -> void:
 		t.mark = 1
 		t.branch = -1
 	Evolve.apply(t, base)
+	cards.apply(t)
 	if t.type != "" and not t.priority_set:
 		t.priority = Bal.PRIORITY_DEFAULT.get(t.type, "first")
-	t.air = Bal.TOWERS[t.type].air if t.type != "" else false
+	# v2.0: story 3 and up can hit air (balloons, bounders mid-hop, leapers)
+	t.air = (Bal.TOWERS[t.type].air or int(t.stats.get("stories", 1)) >= 3) if t.type != "" else false
 	t.reach = t.stats.get("range", 0.0)
 
 
@@ -1418,6 +1432,11 @@ func _spawn(sp: Dictionary, at: Dictionary = {}, hp_override: float = -1.0, gen:
 		overland = true
 	var tier: int = sp.get("tier", 1)
 	var max_hp: float = hp_override if hp_override >= 0.0 else float(wave.unitHp) * Waves.hp_weight(sp)
+	if hp_override < 0.0:
+		if int(base.get("hpBoostBoard", 0)) == board_no:
+			max_hp *= 1.15
+		if sp.get("champion", false) and cards.f("bounty") > 0.0:
+			max_hp *= 1.2
 	var start_d: float = at.get("d", 0.0)
 	var p0 := route.at(start_d)
 	var lane := 0.0
@@ -1798,6 +1817,21 @@ func damage(e: SimEnemy, amount: float, t: SimTower, o: Dictionary = {}) -> floa
 			m *= Bal.ARCH.nautilusFront
 	if e.vuln_t > 0.0:
 		m *= 1.0 + e.vuln
+	# card perks (section 14.3)
+	if e.slow_mult < 1.0:
+		m *= 1.0 + 0.08 * cards.f("deepfreeze") + 0.06 * cards.f("coldsnap")
+	var srcs: String = o.get("src", "")
+	if srcs != "" and Bal.KITS.has(srcs) and Bal.KITS[srcs].where != "ring":
+		m *= 1.0 + 0.15 * cards.f("trapsmith")
+	if t != null and not t.stats.is_empty():
+		if e.airborne or e.arch == "balloon":
+			m *= 1.0 + float(t.stats.get("airBonus", 0.0))
+		if t.priority == "fastest":
+			m *= 1.0 + float(t.stats.get("gyro", 0.0))
+		if is_dot and o.get("dot", false) and t.stats.get("cardColour", "") == "red":
+			m *= 1.0 + 0.12 * cards.f("wildfire")
+		if not is_dot and cards.n("goldenratio") > 0 and t.shots > 0 and t.shots % Cards.golden_every(cards.n("goldenratio")) == 0:
+			m *= Bal.PHI
 	var pierce_armor := false
 	if t != null:
 		m *= t.aura_mult
@@ -1813,6 +1847,8 @@ func damage(e: SimEnemy, amount: float, t: SimTower, o: Dictionary = {}) -> floa
 		dmg = maxf(dmg * Bal.ABILITIES.armorFloor, dmg - arm)
 	if not is_dot:
 		e.last_hit_t = time
+		if t != null and o.get("single", false) and cards.f("executioner") > 0.0 and not e.boss and e.hp - dmg <= e.max_hp * minf(0.3, 0.06 * cards.f("executioner")):
+			dmg = maxf(dmg, e.hp + e.shield + 0.01)
 	if e.shield > 0.0 and not o.get("ignoreShield", false) and not pierce_armor:
 		var s := minf(e.shield, dmg)
 		e.shield -= s
@@ -1824,6 +1860,8 @@ func damage(e: SimEnemy, amount: float, t: SimTower, o: Dictionary = {}) -> floa
 		e.last_tower = t.id
 	if not is_dot:
 		e.hit_flash = 0.08
+		if t != null and not t.stats.is_empty() and e.alive and e.hp > 0.0:
+			_card_on_hit(e, t, dmg, o)
 	if crit:
 		events.append({"t": "hit", "x": e.x, "y": e.y, "amount": dmg, "crit": true})
 	if t != null and not t.stats.is_empty() and not is_dot:
@@ -1851,6 +1889,21 @@ func _source_name(key: String, t: SimTower) -> String:
 	if Bal.KITS.has(key):
 		return Bal.KITS[key].name
 	return key.capitalize()
+
+
+## Card effects on a tower hit: Bramble Roots, Tidal Splash, Seismic Plate.
+func _card_on_hit(e: SimEnemy, t: SimTower, dmg: float, o: Dictionary) -> void:
+	var col: String = t.stats.get("cardColour", "")
+	if col == "green" and cards.f("bramble") > 0.0 and not e.boss and not e.champion:
+		e.stun_t = maxf(e.stun_t, minf(0.6, 0.15 * cards.f("bramble")))
+	if col == "blue" and cards.f("tidal") > 0.0 and o.get("single", false):
+		var r: float = 0.5 * cards.f("tidal")
+		for o2 in enemies:
+			if o2 != e and o2.alive and Vector2(o2.x - e.x, o2.y - e.y).length() <= r + o2.radius:
+				damage(o2, dmg * 0.5, t, {"area": true, "splash": true})
+	var sz: float = t.stats.get("seismic", 0.0)
+	if sz > 0.0 and (o.get("splash", false) or o.get("area", false)) and not e.airborne and not e.overland:
+		_stun(e, sz)
 
 
 func _slow(e: SimEnemy, mult: float, t: float) -> void:
@@ -1881,6 +1934,11 @@ func _kill(e: SimEnemy, t: SimTower) -> void:
 	e.alive = false
 	metrics.kills += 1
 	var essence: float = Bal.SIZES[e.size].essence * Bal.TIER_ESSENCE[e.tier - 1] * (t.stats.get("essenceMult", 1.0) if t != null else 1.0)
+	if t != null and t.stats.get("cardColour", "") == "gold":
+		essence *= 1.0 + 0.15 * cards.f("midas")
+	if e.champion or e.boss:
+		essence *= 1.0 + 0.4 * cards.f("bounty")
+	_card_on_kill(e, t)
 	if e.gen > 0:
 		essence = maxf(0.25, essence / 2.0)
 	if e.ability == "precious":
@@ -1928,7 +1986,7 @@ func _kill(e: SimEnemy, t: SimTower) -> void:
 			continue
 		var n := 0
 		for o2 in enemies:
-			if n >= 2:
+			if n >= 2 + (1 if cards.f("overgrowth") > 0.0 else 0):
 				break
 			if o2.alive and o2 != e and Vector2(o2.x - e.x, o2.y - e.y).length() < 3.0:
 				var nd := dd.duplicate()
@@ -1937,7 +1995,7 @@ func _kill(e: SimEnemy, t: SimTower) -> void:
 				n += 1
 	events.append({"t": "kill", "id": e.id, "x": e.x, "y": e.y, "size": e.size, "suit": e.suit, "arch": e.arch, "split": split, "essence": essence, "group": e.group, "tier": e.tier, "champion": e.champion or e.boss, "tower": t.id if t != null else 0})
 	if time - combo.last <= Bal.COMBO_WINDOW:
-		combo.n += 1
+		combo.n += 2 if (t != null and int(t.stats.get("stories", 1)) >= 5) else 1
 	else:
 		combo.n = 1
 	combo.last = time
@@ -1947,6 +2005,50 @@ func _kill(e: SimEnemy, t: SimTower) -> void:
 
 
 # ---------------------------------------------------------------- towers
+## Card effects on a kill: Shrapnel, Chain Reaction, Overkill Transfer, Salvage, Wildfire.
+func _card_on_kill(e: SimEnemy, t: SimTower) -> void:
+	var over := maxf(0.0, -e.hp)
+	if t != null and not t.stats.is_empty():
+		var sh: float = t.stats.get("shrapnel", 0.0)
+		if sh > 0.0:
+			var near := _near(t, e, 3, 2.5)
+			for o in near:
+				damage(o, float(t.stats.damage) * sh, null, {"area": true, "src": "shrapnel"})
+			if not near.is_empty():
+				events.append({"t": "explode", "x": e.x, "y": e.y, "r": 1.0, "color": "gold"})
+		if cards.f("salvage") > 0.0 and combat.chance(minf(0.3, 0.03 * cards.f("salvage"))):
+			base.ore = float(base.ore) + 1.0
+			events.append({"t": "loot", "x": e.x, "y": e.y, "essence": 0.0, "ore": 1.0, "golden": false})
+		if t.stats.get("cardColour", "") == "red" and cards.f("wildfire") > 0.0:
+			for dd in e.dots:
+				if dd.kind == "burn":
+					for o3 in _near(t, e, 1, 3.0):
+						_add_dot(o3, dd.duplicate())
+					break
+	if cards.f("chainreaction") > 0.0 and combat.chance(minf(0.5, 0.08 * cards.f("chainreaction"))):
+		events.append({"t": "explode", "x": e.x, "y": e.y, "r": 1.6, "color": "red"})
+		for o4 in enemies.duplicate():
+			if o4 != e and o4.alive and Vector2(o4.x - e.x, o4.y - e.y).length() <= 1.6 + o4.radius:
+				damage(o4, e.max_hp * 0.1, null, {"area": true, "src": "chainreaction"})
+	if over > 0.0 and cards.f("overkill") > 0.0:
+		var best: SimEnemy = null
+		var bd := 4.0
+		for o5 in enemies:
+			if o5 != e and o5.alive:
+				var dd2 := Vector2(o5.x - e.x, o5.y - e.y).length()
+				if dd2 < bd:
+					bd = dd2
+					best = o5
+		if best != null:
+			damage(best, over * minf(1.0, 0.25 * cards.f("overkill")), null, {"src": "overkill"})
+
+
+## Keeps systems outside Game in step with the card state (towns read plain numbers).
+func _sync_card_globals() -> void:
+	towns._civic_hp = 13.0 * cards.f("civicpride")
+	towns._civic_prod = 0.15 * cards.f("civicpride")
+
+
 func can_hit(t: SimTower, e: SimEnemy) -> bool:
 	if not e.alive:
 		return false
@@ -1958,7 +2060,7 @@ func can_hit(t: SimTower, e: SimEnemy) -> bool:
 
 
 func in_range(t: SimTower, e: SimEnemy, r: float) -> bool:
-	if e.special == "cloaked" and e.special_on():
+	if e.special == "cloaked" and e.special_on() and not t.stats.get("spotter", false):
 		r = minf(r, Bal.SPECIAL_FX.cloakRange)
 	var rr: float = r + e.radius
 	return (e.x - t.cx) * (e.x - t.cx) + (e.y - t.cy) * (e.y - t.cy) <= rr * rr
@@ -2011,7 +2113,7 @@ func _pick_target(t: SimTower, r: float) -> SimEnemy:
 func _aim(t: SimTower, x: float, y: float, dt: float) -> bool:
 	var want := atan2(y - t.cy, x - t.cx)
 	var diff := wrapf(want - t.angle, -PI, PI)
-	var rate: float = Bal.TURN_RATE.get(t.type, 6.0) * (1.6 if t.base_tower else 1.0)
+	var rate: float = Bal.TURN_RATE.get(t.type, 6.0) * (1.6 if t.base_tower else 1.0) * float(t.stats.get("turnMult", 1.0))
 	var stepa := rate * dt
 	if absf(diff) <= stepa:
 		t.angle = want
@@ -2295,7 +2397,7 @@ func _proj(kind: String, t: SimTower, tgt: SimEnemy, dmg: float, spd: float) -> 
 	p.tx = tgt.x
 	p.ty = tgt.y
 	p.target_id = tgt.id
-	p.speed = spd
+	p.speed = spd * ((1.0 + float(t.stats.get("afterburn", 0.0))) if kind == "homing" else 1.0)
 	p.damage = dmg
 	p.tower = t.id
 	p.color = t.stats.get("color", "")

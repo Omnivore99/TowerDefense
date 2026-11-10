@@ -189,6 +189,13 @@ func _start_demo(args: PackedStringArray) -> void:
 		_resync_all()
 	if args.has("--rich"):
 		_showcase()
+	if args.has("--draw"):
+		g.base.pearls = 3
+		g.cards.start_draw(g)
+		g.cards.peek(g, 1)
+		g.drain_events()
+		draw_picks = [0, 3]
+		call_deferred("_draw_modal")
 	if args.has("--select"):
 		var best: SimTower = null
 		for t in g.towers:
@@ -279,6 +286,13 @@ func _showcase() -> void:
 				break
 		if not done:
 			continue
+	var att_ids := ["scope", "tesla", "spotter", "overcharger", "gyro", "dronepod"]
+	for i in mini(ts.size(), 3):
+		var tt: SimTower = ts[i]
+		for k in int(tt.stats.get("stories", 1)):
+			g.cards.hand = [{"id": att_ids[(i * 2 + k) % att_ids.size()], "m": 2}]
+			g.cards.mount(g, 0, tt)
+	g.cards.hand = []
 	var picks := ["granary", "walls", "market", "barracks", ""]
 	for tw in g.towns.list:
 		while tw.level < 5 and g.level_town(tw.id, picks[tw.level - 1]) == "":
@@ -807,6 +821,19 @@ func _handle_events(evs: Array) -> void:
 			"mirror":
 				fx.ribbon(_w(e.x, e.y, 0.7), _w(e.x2, e.y2, 1.2), 0.1, Color(0.8, 0.9, 1.0), 0.3, true, 4)
 				fx.ring(_w(e.x2, e.y2, 1.2), 0.2, 1.0, 0.3, Color(0.8, 0.9, 1.0, 0.8))
+			"cardDraw":
+				if playing and demo_bot == null:
+					call_deferred("open_draw")
+			"cardsTaken":
+				for c in e.cards:
+					if Bal.CARDS[c.id].cat == "attachment":
+						hud.toast("%s ×%d ready: select a tower and press Attach" % [Bal.CARDS[c.id].name, c.m], Color(0.65, 0.8, 1.0), 3.0)
+			"attach":
+				var tvx: TowerView = tower_views.get(e.tower)
+				if tvx != null:
+					tvx.rebuild()
+				fx.burst(_w(e.x, e.y, 1.5), 16, 3.0, Color(0.6, 0.8, 1.0), 0.07, 0.6)
+				sfx.play("bell")
 			"waveStart":
 				hud.toast("Wave %d" % e.index, Color(1, 0.8, 0.45), 1.6)
 				sfx.play("wave", -4.0)
@@ -1102,7 +1129,8 @@ func _on_phase(p: String) -> void:
 		"cleared":
 			_sync_road_pieces(true)
 			SaveIO.log_metrics(g.metrics)
-			_cleared_screen()
+			if not g.cards.pending:
+				_cleared_screen()
 		"base":
 			_base_screen()
 		"reveal":
@@ -2306,6 +2334,117 @@ func _settings_screen(from_title: bool) -> void:
 		c.button_pressed = bool(settings[key])
 		c.toggled.connect(func(v: bool): settings[key] = v)
 		grid.add_child(c)
+
+
+# ------------------------------------------------------------------ card draws (section 14)
+const CAT_COLOR := {"colour": "#ff9a6a", "attachment": "#8cc8ff", "modifier": "#ffd27a", "gambit": "#d08cff"}
+var draw_picks: Array = []
+
+
+func open_draw() -> void:
+	if not g.cards.pending:
+		return
+	sfx.play("card_shuffle")
+	draw_picks = []
+	_draw_modal()
+
+
+func _draw_modal() -> void:
+	var cd: Cards = g.cards
+	var n := draw_picks.size()
+	var mult_txt := "Pick 1 card for ×4, 2 for ×2 each or 3 for ×1 each." if cd.max_flips() == 3 else "Blood Moon: pick up to 4 cards at ×1."
+	var vb: VBoxContainer = hud.open_modal("Card draw", "[color=#8a93a6]The backs show the category. %s Pearls: peek 1 ●, reshuffle 2 ●.[/color]" % mult_txt, [
+		["Reshuffle (2 ●)", func():
+			var er := cd.reshuffle(g)
+			if er != "":
+				hud.toast(er, Color(1, 0.6, 0.5), 1.4)
+			else:
+				sfx.play("card_shuffle")
+			draw_picks = []
+			_draw_modal()],
+		["Turn over %d%s" % [n, "  (×%d)" % Bal.CARD_MULT[n] if n > 0 else ""], func():
+			if draw_picks.is_empty():
+				hud.toast("Pick at least one card", Color(1, 0.6, 0.5), 1.2)
+				return
+			var took := cd.take(g, draw_picks)
+			sfx.play("card_flip")
+			_draw_result(took)],
+	], 860)
+	var hb := HBoxContainer.new()
+	hb.add_theme_constant_override("separation", 10)
+	vb.add_child(hb)
+	vb.move_child(hb, 2)
+	for i in cd.deal.size():
+		var c: Dictionary = cd.deal[i]
+		var col: VBoxContainer = VBoxContainer.new()
+		hb.add_child(col)
+		var b := Button.new()
+		b.custom_minimum_size = Vector2(150, 190)
+		b.toggle_mode = true
+		b.button_pressed = draw_picks.has(i)
+		var glint := " ✦" if c.rarity == "rare" else ""
+		var txt := "%s%s" % [c.cat.capitalize(), glint]
+		if cd.peeked.has(i):
+			txt += "\n\n" + Bal.CARDS[c.id].name
+		b.text = txt
+		b.add_theme_color_override("font_color", Color.html(CAT_COLOR[c.cat]))
+		b.add_theme_color_override("font_pressed_color", Color(1, 1, 1))
+		b.autowrap_mode = TextServer.AUTOWRAP_WORD
+		b.toggled.connect(func(on: bool):
+			if on and not draw_picks.has(i):
+				if draw_picks.size() >= cd.max_flips():
+					b.set_pressed_no_signal(false)
+					return
+				draw_picks.append(i)
+			elif not on:
+				draw_picks.erase(i)
+			sfx.play("tap")
+			_draw_modal())
+		col.add_child(b)
+		var pk := Button.new()
+		pk.text = "Peek 1 ●" if not cd.peeked.has(i) else "peeked"
+		pk.disabled = cd.peeked.has(i)
+		pk.pressed.connect(func():
+			var er2 := cd.peek(g, i)
+			if er2 != "":
+				hud.toast(er2, Color(1, 0.6, 0.5), 1.4)
+			_draw_modal())
+		col.add_child(pk)
+	hud.call_deferred("_recentre")
+
+
+func _draw_result(took: Array) -> void:
+	var lines: PackedStringArray = []
+	for c in took:
+		var def: Dictionary = Bal.CARDS[c.id]
+		lines.append("[color=%s][b]%s[/b][/color] ×%d  %s%s" % [CAT_COLOR[def.cat], def.name, c.m, Cards.face(c, c.m), "  [color=#ffd27a]✦ rare[/color]" if def.rarity == "rare" else ""])
+	for c in took:
+		if Bal.CARDS[c.id].rarity == "rare":
+			fx.burst(cam_rig.cam.global_position + cam_rig.cam.global_basis.z * -6.0, 30, 4.0, Color(1, 0.85, 0.4), 0.06, 0.8)
+	hud.open_modal("Cards turned over", "\n".join(lines) + "\n\n[color=#8a93a6]Swept away unseen cards are listed in the log. Attachments wait in your hand: select a tower and press Attach.[/color]", [["Continue", func():
+		hud.close_modal()
+		if g.phase == "cleared":
+			_cleared_screen()]], 720)
+
+
+func open_attach() -> void:
+	var t := g.tower_by_id(selected_tower)
+	if t == null or g.cards.hand.is_empty():
+		return
+	var vb: VBoxContainer = hud.open_modal("Attach to %s" % t.type, "[color=#8a93a6]%d of %d slots used (one per story).[/color]" % [t.attach.size(), int(t.stats.stories)], [["Close", func(): hud.close_modal()]], 560)
+	for i in g.cards.hand.size():
+		var a: Dictionary = g.cards.hand[i]
+		var b := Button.new()
+		b.text = "%s ×%d: %s" % [Bal.CARDS[a.id].name, a.m, Cards.face(a, a.m)]
+		b.disabled = t.attach.size() >= int(t.stats.stories)
+		b.pressed.connect(func():
+			var er := g.cards.mount(g, i, t)
+			if er != "":
+				hud.toast(er, Color(1, 0.6, 0.5), 1.4)
+			hud.close_modal())
+		vb.add_child(b)
+		vb.move_child(b, vb.get_child_count() - 2)
+	hud.call_deferred("_recentre")
 
 
 func _cleared_screen() -> void:

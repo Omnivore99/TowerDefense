@@ -28,6 +28,7 @@ static func run_all() -> int:
 	_test_towns()
 	_test_deploy()
 	_test_specials()
+	_test_cards()
 	print("%d checks, %d failures (%.1f s)" % [checks, failures, (Time.get_ticks_msec() - t0) / 1000.0])
 	return 1 if failures > 0 else 0
 
@@ -294,3 +295,61 @@ static func _test_specials() -> void:
 	var hp0 := e.hp
 	g.damage(e, 10.0, t, {"beam": true})
 	check(e.hp == hp0 and t.stun_t > 0.0, "mirror shells reflect the first beam as a stun")
+
+
+static func _test_cards() -> void:
+	check(absf(Bal.STORY_DAMAGE - 1.5) < 1e-9, "each story x1.5 damage")
+	var g := _calm_game(101)
+	var cd := g.cards
+	cd.start_draw(g)
+	check(cd.pending and cd.deal.size() == 5, "a draw deals 5 cards")
+	g.ready()
+	check(g.phase == "calm", "Ready waits for the draw")
+	var one := cd.take(g, [0])
+	check(one.size() == 1 and one[0].m == 4, "one card turns over at x4")
+	cd.start_draw(g)
+	var three := cd.take(g, [0, 1, 2])
+	check(three.size() == 3 and three[0].m == 1, "three cards turn over at x1")
+	check(Cards.count_of(1) == 1 and Cards.count_of(2) == 2 and Cards.count_of(4) == 3, "count cards step 1, 2, 3")
+	check(Cards.face({"id": "forge"}, 4).contains("40%"), "a x4 Forge Heat face shows +40%")
+	# glass cannon raises tower damage
+	var t: SimTower = null
+	for x in g.towers:
+		if x.type != "" and not x.base_tower:
+			t = x
+	if t == null:
+		g.must.clear()
+		var o := g.stream.make("O", "red")
+		for cy in range(2, Bal.GRID_H - 2):
+			if t != null:
+				break
+			for cx in range(2, Bal.GRID_W - 6):
+				if g.preview(o, 0, false, cx, cy).get("kind", "") == "tower" and g.preview(o, 0, false, cx + 2, cy).ok and g.preview(o, 0, false, cx + 4, cy).ok:
+					for k in 3:
+						g.may[0] = g.stream.make("O", "red")
+						g.place({"zone": "may", "index": 0}, 0, false, cx + 2 * k, cy)
+					for x in g.towers:
+						if x.type != "":
+							t = x
+					break
+	check(t != null, "a tower to test cards on")
+	if t == null:
+		return
+	var d0: float = t.stats.damage
+	cd.fx["glasscannon"] = 1.0
+	g._rebuild_all()
+	check(absf(t.stats.damage / d0 - 1.25) < 0.01, "Glass Cannon x1 adds 25%% damage (%.3f)" % (t.stats.damage / d0))
+	cd.fx.erase("glasscannon")
+	cd.hand = [{"id": "scope", "m": 2}, {"id": "coolant", "m": 1}]
+	var r0: float = t.stats.range
+	check(cd.mount(g, 0, t) == "", "mount a Scope")
+	check(absf(t.stats.range / r0 - 1.24) < 0.01, "a x2 Scope adds 24%% range")
+	var slots: int = t.stats.stories
+	if slots <= 1:
+		check(cd.mount(g, 0, t) != "", "one attachment per story")
+	var snap := g.snapshot()
+	var g2 := Game.new(101, "normal", {"tutorial": false, "snapshot": snap})
+	var t2 := g2.tower_by_id(t.id)
+	check(t2 != null and t2.attach.size() == t.attach.size(), "attachments survive a save")
+	# draws come every 4th wave
+	check(cd.want_draw(4, false) and not cd.want_draw(5, false) and cd.want_draw(5, true), "draw after every 4th wave and each board clear")

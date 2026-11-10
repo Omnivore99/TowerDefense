@@ -44,6 +44,8 @@ var evo_t := 99.0
 var fire_drop_t := 0.0
 ## Stunned by a Mirror shell's reflected beam (section 8.4).
 var stun_t := 0.0
+## Card attachments mounted on this tower (section 14.3): [{id, m}], one per story.
+var attach: Array = []
 
 
 func ground_count() -> int:
@@ -66,6 +68,7 @@ func copy() -> SimTower:
 	var t := SimTower.new()
 	t.id = id
 	t.pieces = pieces.duplicate(true)
+	t.attach = attach.duplicate(true)
 	t.layers = layers.duplicate(true)
 	t.height = height
 	t.type = type

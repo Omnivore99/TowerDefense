@@ -42,8 +42,11 @@ func setup(t: SimTower, tv: TerrainView) -> void:
 	rebuild()
 
 
+var built_attach := 0
+
+
 func needs_rebuild() -> bool:
-	return tower.pieces.size() != piece_count or tower.type != built_type or tower.mark != built_mark
+	return tower.pieces.size() != piece_count or tower.type != built_type or tower.mark != built_mark or tower.attach.size() != built_attach
 
 
 func rebuild() -> void:
@@ -147,6 +150,7 @@ func rebuild() -> void:
 	if crown or t.mark >= 2:
 		Kit.crenellations(body, rt, drum_h, 10 if crown else 8)
 	_evo_parts(t, rt, drum_h)
+	_attachments(t, r, seg_h)
 	# weapon module on top (on the dome for 3+ stories, so it rises with the tower)
 	var s := (0.95 + 0.05 * (mass - 3) + 0.06 * stories) * (1.0 + 0.1 * (t.mark - 1))
 	var w := Weapons.build(t.type, body, glow_color, s)
@@ -174,6 +178,50 @@ func rebuild() -> void:
 	built_stories = stories
 	if evolved:
 		_start_scaffold(rt, drum_h)
+
+
+## Card attachments (section 14.3): one bolt-on module per story deck, on the tower's side.
+func _attachments(t: SimTower, r: float, seg_h: float) -> void:
+	built_attach = t.attach.size()
+	for i in t.attach.size():
+		var id: String = t.attach[i].id
+		var deck_y := 0.16 + 0.75 * 0.5 + seg_h * i
+		var rr := r * (1.0 - 0.05 * i)
+		var a := -PI / 2.0 + i * 2.2
+		var n := Node3D.new()
+		body.add_child(n)
+		n.position = Vector3(cos(a) * rr * 1.1, deck_y, sin(a) * rr * 1.1)
+		n.rotation.y = -a
+		match id:
+			"scope":
+				Kit.add(n, Kit.cylinder(0.05, 0.05, 0.4, 10), Kit.dark_iron(), Vector3(0.06, 0.1, 0), Vector3(0, 0, PI / 2))
+				Kit.add(n, Kit.cylinder(0.055, 0.055, 0.02, 10), Kit.glass(Color(0.6, 0.9, 1.0)), Vector3(0.27, 0.1, 0), Vector3(0, 0, PI / 2))
+			"twin":
+				Kit.add(n, Kit.cylinder(0.04, 0.05, 0.5, 8), Kit.dark_iron(), Vector3(0.2, 0.05, 0), Vector3(0, 0, PI / 2))
+			"coolant":
+				for k in 2:
+					Kit.pipe(n, Vector3(0.05, -0.15, -0.1 + 0.2 * k), Vector3(0.05, 0.2, -0.1 + 0.2 * k), 0.035, Kit.glass(Color(0.6, 0.9, 1.0)))
+			"tesla":
+				for k in 3:
+					Kit.add(n, Kit.torus(0.05, 0.09, 10), Kit.copper(), Vector3(0.1, 0.05 + 0.07 * k, 0))
+				Kit.add(n, Kit.sphere(0.06, 8), Kit.glow(Color(0.6, 0.8, 1.0), 4.0), Vector3(0.1, 0.3, 0))
+			"dronepod":
+				Kit.add(n, Kit.box(Vector3(0.2, 0.15, 0.25)), Kit.dark_iron(), Vector3(0.08, 0, 0))
+				Kit.add(n, Kit.sphere(0.03, 6), Kit.glow(Color(0.3, 0.7, 1.0), 5.0), Vector3(0.19, 0.03, 0))
+			"gyro":
+				Kit.add(n, Kit.torus(0.1, 0.13, 14), Kit.brass(), Vector3(0.1, 0.05, 0), Vector3(PI / 2, 0, 0))
+				Kit.add(n, Kit.torus(0.1, 0.13, 14), Kit.brass(), Vector3(0.1, 0.05, 0))
+			"spotter":
+				Kit.add(n, Kit.cylinder(0.015, 0.015, 0.7, 4), Kit.dark_iron(), Vector3(0.05, 0.35, 0))
+				Kit.add(n, Kit.sphere(0.035, 6), Kit.glow(Color(1, 0.3, 0.2), 5.0), Vector3(0.05, 0.72, 0))
+			"seismic":
+				Kit.add(n, Kit.box(Vector3(0.08, 0.3, 0.3)), Kit.iron(), Vector3(0.04, 0, 0))
+			"overcharger":
+				Kit.add(n, Kit.sphere(0.1, 10), Kit.glow(Color(1, 0.4, 0.9), 4.0), Vector3(0.1, 0.05, 0))
+			"splitter":
+				Kit.add(n, Kit.cone(0.08, 0.2, 4), Kit.glass(Color(0.8, 0.95, 1.0)), Vector3(0.1, 0.05, 0))
+			_:
+				Kit.add(n, Kit.box(Vector3(0.14, 0.2, 0.2)), Kit.brass(), Vector3(0.07, 0, 0))
 
 
 ## Mk II lanterns, Mk III technology module, Mk IV rings of light (section 9.5, ref 4).
