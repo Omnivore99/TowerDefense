@@ -182,6 +182,8 @@ func _start_demo(args: PackedStringArray) -> void:
 		last_road_version = g.board.version
 		_build_core()
 		_resync_all()
+	if args.has("--rich"):
+		_showcase()
 	if args.has("--select"):
 		var best: SimTower = null
 		for t in g.towers:
@@ -190,7 +192,12 @@ func _start_demo(args: PackedStringArray) -> void:
 		if best != null:
 			selected_tower = best.id
 	var cam := _arg(args, "--cam", "")
-	if cam == "tower" and selected_tower != 0:
+	if cam == "kit" and not g.arsenal.metronomes.is_empty():
+		var m0: Dictionary = g.arsenal.metronomes[0]
+		cam_rig.target = Vector3(m0.x, 0, m0.y)
+		cam_rig.dist_goal = float(_arg(args, "--dist", "18"))
+		cam_rig.dist = cam_rig.dist_goal
+	elif cam == "tower" and selected_tower != 0:
 		var st := g.tower_by_id(selected_tower)
 		cam_rig.target = Vector3(st.cx, 0, st.cy)
 		cam_rig.dist_goal = float(_arg(args, "--dist", "16"))
@@ -200,7 +207,7 @@ func _start_demo(args: PackedStringArray) -> void:
 		cam_rig.target = Vector3(e0.x, 0, e0.y)
 		cam_rig.dist_goal = float(cam.split(",")[1]) if cam.contains(",") else 24.0
 		cam_rig.dist = cam_rig.dist_goal
-	elif cam != "" and cam != "tower" and not cam.begins_with("enemy"):
+	elif cam != "" and cam != "tower" and cam != "kit" and not cam.begins_with("enemy"):
 		var c := cam.split(",")
 		cam_rig.target = Vector3(float(c[0]), 0, float(c[1]))
 		cam_rig.dist_goal = float(c[2])
@@ -212,6 +219,56 @@ func _start_demo(args: PackedStringArray) -> void:
 		cam_rig.recentre()
 	shot_path = _arg(args, "--shot", "")
 	shot_wait = float(_arg(args, "--wait", "2.0"))
+
+
+## Demo only: fill the base and show off evolutions and kits for screenshots.
+func _showcase() -> void:
+	g.base.ore = 999.0
+	g.base.timber = 999.0
+	g.base.water = 999.0
+	g.base.essence = 999.0
+	g.base.pearls = 20
+	g.base.unlocked = Bal.BASE_SQUARES.size()
+	for k in Bal.TECHS:
+		g.base.tech[k] = 6
+	if not g.has_building("armory"):
+		for i in Bal.BASE_SQUARES.size():
+			if g.base.buildings[i] == "" and Bal.BASE_SQUARES[i].size >= 2:
+				g.base.buildings[i] = "armory"
+				break
+	var ts: Array = g.towers.filter(func(t): return t.type != "")
+	ts.sort_custom(func(a, b): return a.ground_count() > b.ground_count())
+	for i in mini(ts.size(), 6):
+		var t: SimTower = ts[i]
+		var target := 4 - (i % 3)
+		while t.mark < target:
+			if g.evolve(t.id, i % 2) != "":
+				break
+	for id in ["howitzer", "howitzer", "airstrike", "orbital"]:
+		g.buy_kit(id)
+	for id in ["metronome_thunder", "ram_impact", "landmine", "spike", "tar"]:
+		g.buy_kit(id)
+	var r: Route = g.board.routes[0]
+	for slot in g.arsenal.belt.size():
+		var id: String = g.arsenal.belt[slot]
+		if id == "":
+			continue
+		var done := false
+		for k in 400:
+			var d := r.length * (0.2 + 0.002 * k)
+			var p := r.at(d)
+			var side := 1.0 if k % 2 == 0 else -1.0
+			var off := Vector2(-sin(p.z), cos(p.z)) * (0.0 if Bal.KITS[id].where == "road" else 3.0 * side)
+			if g.place_kit(slot, 0, floori(p.x + off.x), floori(p.y + off.y)).get("ok", false):
+				done = true
+				break
+		if not done:
+			continue
+	for e in g.drain_events():
+		pass
+	for t in g.towers:
+		if tower_views.has(t.id):
+			tower_views[t.id].rebuild()
 
 
 func _root(n: String) -> Node3D:

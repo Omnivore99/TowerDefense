@@ -790,6 +790,8 @@ func preview(piece: Dictionary, rot: int, mirror: bool, cx: int, cy: int) -> Dic
 			return _bad("That is the core", cells)
 		if obj_at[Board.cell_idx(c.x, c.y)] != 0:
 			return _bad("Occupied", cells)
+		if arsenal.off_at.has(Board.cell_idx(c.x, c.y)) or arsenal.trap_at.has(Board.cell_idx(c.x, c.y)):
+			return _bad("A kit is there", cells)
 		if board.is_blocked_terrain(Board.cell_idx(c.x, c.y)) and not eco.is_forest(Board.cell_idx(c.x, c.y)):
 			return _bad(blocked_reason(Board.cell_idx(c.x, c.y)), cells)
 	var under := {}

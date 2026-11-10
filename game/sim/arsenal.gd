@@ -163,7 +163,7 @@ func preview(g, id: String, rot: int, cx: int, cy: int) -> Dictionary:
 				return bad.call("Not on the road")
 			if g.tower_at[i] != 0 or g.obj_at[i] != 0:
 				return bad.call("Something is built there")
-			if g.blocked_reason(i) != "":
+			if g.board.is_blocked_terrain(i):
 				return bad.call(g.blocked_reason(i))
 	if where == "road":
 		var m := Board.mid(cells[0].x / Bal.MACRO, cells[0].y / Bal.MACRO)

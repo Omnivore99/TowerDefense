@@ -211,7 +211,7 @@ func _build_top() -> void:
 
 func _slot(parent: Control, zone: String, index: int) -> Button:
 	var b := Button.new()
-	b.custom_minimum_size = Vector2(96, 84)
+	b.custom_minimum_size = Vector2(88, 68)
 	var icon := PieceIcon.new()
 	icon.name = "Icon"
 	icon.set_anchors_preset(Control.PRESET_FULL_RECT)
