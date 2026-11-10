@@ -1,0 +1,1284 @@
+class_name World
+extends Node3D
+## The playable world: owns the Game (sim), steps it at a fixed 60 Hz scaled by the speed
+## setting, turns sim events into feedback, and keeps the 3D views in sync with the sim.
+## Input: left click places / selects, right-drag pans, wheel zooms, R rotate, F mirror,
+## H hold, Space or Enter Ready, Esc undo (2 s) / cancel, Q E turn the camera, Home recentre,
+## P pause, 1 2 3 pick MUST USE pieces, 4 5 6 pick MAY USE.
+
+const SPEEDS := [0.5, 1.0, 2.0, 3.0]
+const MAX_STEPS_PER_FRAME := 12
+
+var g: Game
+var settings: Dictionary
+var meta: Dictionary
+var terrain: TerrainView
+var cam_rig: CamRig
+var fx: Fx
+var hud: Hud
+var env: Environment
+var sun: DirectionalLight3D
+var core: Node3D
+var core_glow: OmniLight3D
+var core_ring: MeshInstance3D
+var tower_root: Node3D
+var enemy_root: Node3D
+var proj_root: Node3D
+var misc_root: Node3D
+var tower_views := {}  ## tower id -> TowerView
+var enemy_views := {}  ## enemy id -> EnemyView
+var proj_views := {}  ## projectile id -> MeshInstance3D
+var road_views := {}  ## road piece id -> Node3D
+var harv_views := {}  ## harvester id -> Node3D
+var tank_views := {}  ## tank id -> Node3D
+var puddle_views: Array[MeshInstance3D] = []
+
+var speed := 1.0
+var paused := false
+var acc := 0.0
+var alpha := 1.0
+var selected: Dictionary = {}
+var rot := 0
+var mirror := false
+var hover := Vector2i(-999, -999)
+var ghost: Node3D
+var ghost_sig := ""
+var range_ring: MeshInstance3D
+var selected_tower := 0
+var last_revealed := 0
+var last_road_version := -1
+var playing := false
+var pan_drag := false
+var pan_moved := 0.0
+var mouse_pos := Vector2.ZERO
+var bolt_t := 0.0
+## Demo / screenshot mode (user args): --demo [--warp B,W,S] [--cam x,z,dist,yaw] [--shot path.png]
+var demo_bot: Bot
+var shot_path := ""
+var shot_wait := 2.0
+
+
+func _ready() -> void:
+	settings = SaveIO.load_settings()
+	meta = SaveIO.load_meta()
+	speed = float(settings.speed)
+	_build_environment()
+	terrain = TerrainView.new()
+	terrain.name = "Terrain"
+	add_child(terrain)
+	tower_root = _root("Towers")
+	enemy_root = _root("Enemies")
+	proj_root = _root("Projectiles")
+	misc_root = _root("Misc")
+	cam_rig = CamRig.new()
+	cam_rig.name = "CamRig"
+	cam_rig.reduced_motion = settings.reducedMotion
+	cam_rig.sensitivity = float(settings.camSensitivity)
+	add_child(cam_rig)
+	fx = Fx.new()
+	fx.name = "Fx"
+	fx.reduced_motion = settings.reducedMotion
+	fx.quality = 0.5 if OS.has_feature("web") or settings.quality == "low" else 1.0
+	add_child(fx)
+	fx.cam = cam_rig.cam
+	fx.ground_y = func(x: float, z: float) -> float: return _ground_y(x, z)
+	ghost = Node3D.new()
+	ghost.name = "Ghost"
+	add_child(ghost)
+	range_ring = MeshInstance3D.new()
+	range_ring.mesh = Kit.torus(0.96, 1.0, 64)
+	range_ring.material_override = Kit.unshaded(Color(1.0, 0.75, 0.35, 0.55), true)
+	range_ring.visible = false
+	add_child(range_ring)
+	var layer := CanvasLayer.new()
+	add_child(layer)
+	hud = Hud.new()
+	hud.w = self
+	layer.add_child(hud)
+	# a quiet board behind the title screen
+	_new_game(int(Time.get_unix_time_from_system()) & 0x7FFFFFFF, "normal", {}, false)
+	cam_rig.frame_all()
+	var args := OS.get_cmdline_user_args()
+	if args.has("--demo"):
+		_start_demo(args)
+	else:
+		_title_screen()
+
+
+func _arg(args: PackedStringArray, key: String, def: String) -> String:
+	var i := args.find(key)
+	return args[i + 1] if i >= 0 and i + 1 < args.size() else def
+
+
+func _start_demo(args: PackedStringArray) -> void:
+	_new_game(int(_arg(args, "--seed", "7")), _arg(args, "--mode", "normal"), {}, false)
+	playing = true
+	demo_bot = Bot.new(g, _arg(args, "--skill", "expert"), 99)
+	var warp := _arg(args, "--warp", "")
+	if warp != "":
+		var w := warp.split(",")
+		var wb := int(w[0])
+		var ww := int(w[1])
+		var ws := float(w[2]) if w.size() > 2 else 8.0
+		var guard := 0
+		while guard < 400000:
+			guard += 1
+			demo_bot.act()
+			g.step()
+			if g.phase == "reveal" or g.events.size() > 4000:
+				g.events.clear()
+			if g.phase == "lost":
+				g.retry_board()
+			if g.board_no == wb and g.wave_index == ww and g.phase == "wave" and g.wave_t >= ws:
+				break
+			if g.board_no > wb:
+				break
+		g.events.clear()
+		terrain.rebuild()
+		last_road_version = g.board.version
+		_build_core()
+		_resync_all()
+	var cam := _arg(args, "--cam", "")
+	if cam.begins_with("enemy") and not g.enemies.is_empty():
+		var e0: SimEnemy = g.enemies[0]
+		cam_rig.target = Vector3(e0.x, 0, e0.y)
+		cam_rig.dist_goal = float(cam.split(",")[1]) if cam.contains(",") else 24.0
+		cam_rig.dist = cam_rig.dist_goal
+	elif cam != "" and not cam.begins_with("enemy"):
+		var c := cam.split(",")
+		cam_rig.target = Vector3(float(c[0]), 0, float(c[1]))
+		cam_rig.dist_goal = float(c[2])
+		cam_rig.dist = cam_rig.dist_goal
+		if c.size() > 3:
+			cam_rig.yaw_goal = deg_to_rad(float(c[3]))
+			cam_rig.yaw = cam_rig.yaw_goal
+	else:
+		cam_rig.recentre()
+	shot_path = _arg(args, "--shot", "")
+	shot_wait = float(_arg(args, "--wait", "2.0"))
+
+
+func _root(n: String) -> Node3D:
+	var r := Node3D.new()
+	r.name = n
+	add_child(r)
+	return r
+
+
+# ------------------------------------------------------------------ environment ("dusk fortress")
+func _build_environment() -> void:
+	env = Environment.new()
+	var sky_mat := ProceduralSkyMaterial.new()
+	sky_mat.sky_top_color = Color(0.13, 0.17, 0.27)
+	sky_mat.sky_horizon_color = Color(0.72, 0.52, 0.42)
+	sky_mat.ground_horizon_color = Color(0.32, 0.3, 0.33)
+	sky_mat.ground_bottom_color = Color(0.1, 0.11, 0.14)
+	sky_mat.sun_angle_max = 20.0
+	var sky := Sky.new()
+	sky.sky_material = sky_mat
+	env.background_mode = Environment.BG_SKY
+	env.sky = sky
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.5, 0.55, 0.68)
+	env.ambient_light_energy = 0.75
+	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	env.tonemap_exposure = 1.05
+	env.glow_enabled = true
+	env.glow_intensity = 0.75
+	env.glow_bloom = 0.08
+	env.glow_hdr_threshold = 1.1
+	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
+	env.fog_enabled = true
+	env.fog_light_color = Color(0.42, 0.42, 0.55)
+	env.fog_density = 0.0018
+	env.fog_sky_affect = 0.3
+	env.adjustment_enabled = true
+	env.adjustment_saturation = 1.08
+	env.adjustment_contrast = 1.05
+	if not OS.has_feature("web"):
+		env.ssao_enabled = true
+		env.ssao_radius = 1.2
+		env.ssao_intensity = 1.6
+	var we := WorldEnvironment.new()
+	we.environment = env
+	add_child(we)
+	sun = DirectionalLight3D.new()
+	sun.light_color = Color(1.0, 0.82, 0.66)
+	sun.light_energy = 1.15
+	sun.rotation = Vector3(deg_to_rad(-38.0), deg_to_rad(-142.0), 0)
+	sun.shadow_enabled = true
+	sun.directional_shadow_max_distance = 140.0
+	sun.shadow_blur = 1.5
+	add_child(sun)
+	var fill := DirectionalLight3D.new()
+	fill.light_color = Color(0.45, 0.55, 0.85)
+	fill.light_energy = 0.3
+	fill.rotation = Vector3(deg_to_rad(-55.0), deg_to_rad(40.0), 0)
+	add_child(fill)
+
+
+# ------------------------------------------------------------------ the core keep
+func _build_core() -> void:
+	if core != null:
+		core.queue_free()
+	core = Node3D.new()
+	core.name = "Core"
+	add_child(core)
+	var c := Board.CORE_PT
+	var y0 := terrain.cell_pos(c.x, c.y).y
+	core.position = Vector3(c.x, y0, c.y)
+	var r := Bal.CORE_RADIUS
+	# plinth, keep, four corner towers, roof spire, amber heart
+	Kit.add(core, Kit.bevel_box(Vector3(r * 2.0, 0.5, r * 2.0), 0.12), Kit.stone(Color(0.19, 0.21, 0.26)), Vector3(0, 0.25, 0))
+	Kit.drum(core, r * 0.62, 2.6, 0.5, Color(0.22, 0.25, 0.31))
+	Kit.crenellations(core, r * 0.64, 3.1, 12)
+	Kit.windows(core, r * 0.63, 1.6, 8, Kit.amber(4.0))
+	for i in 4:
+		var a := PI / 4.0 + i * PI / 2.0
+		var p := Vector3(cos(a), 0, sin(a)) * r * 0.85
+		var t := Node3D.new()
+		t.position = p
+		core.add_child(t)
+		Kit.drum(t, 0.55, 2.0, 0.5)
+		Kit.add(t, Kit.cone(0.7, 1.1, 8), Kit.roof(), Vector3(0, 3.05, 0))
+		Kit.lantern(t, Vector3(0, 2.5, 0.6))
+	Kit.add(core, Kit.cone(r * 0.5, 2.2, 12), Kit.roof(), Vector3(0, 4.2, 0))
+	var heart := Kit.add(core, Kit.sphere(0.45, 16), Kit.amber(2.5), Vector3(0, 5.6, 0))
+	heart.name = "Heart"
+	core_ring = Kit.add(core, Kit.torus(0.62, 0.7, 32), Kit.glow(Color(1, 0.65, 0.25), 4.0), Vector3(0, 5.6, 0), Vector3(PI / 2.0, 0, 0))
+	core_glow = OmniLight3D.new()
+	core_glow.light_color = Color(1.0, 0.66, 0.3)
+	core_glow.light_energy = 2.5
+	core_glow.omni_range = 14.0
+	core_glow.position = Vector3(0, 5.6, 0)
+	core.add_child(core_glow)
+	cam_rig.home = Vector3(c.x, 0, c.y)
+
+
+# ------------------------------------------------------------------ game lifecycle
+func _new_game(seed_value: int, mode: String, snapshot: Dictionary, tutorial: bool) -> void:
+	var opts := {"tutorial": tutorial}
+	if not snapshot.is_empty():
+		opts["snapshot"] = snapshot
+	g = Game.new(seed_value, mode, opts)
+	for k in meta.get("discovered", []):
+		g.discovered[k] = true
+	for k in meta.get("elements", []):
+		g.discovered_elements[k] = true
+	g.undo_enabled = true
+	terrain.setup(g.board)
+	last_road_version = g.board.version
+	last_revealed = 0
+	_build_core()
+	_resync_all()
+	selected = {}
+	selected_tower = 0
+	acc = 0.0
+
+
+func start_run(mode: String, tutorial: bool) -> void:
+	hud.close_modal()
+	_new_game(int(Time.get_unix_time_from_system() * 1000.0) & 0x7FFFFFFF, mode, {}, tutorial)
+	playing = true
+	paused = false
+	cam_rig.recentre()
+	SaveIO.save_run(g)
+
+
+func continue_run() -> void:
+	var d := SaveIO.load_run()
+	if d.is_empty():
+		hud.toast("No saved run found", Color(1, 0.6, 0.5))
+		return
+	hud.close_modal()
+	_new_game(int(d.seed), String(d.mode), d.snapshot, false)
+	playing = true
+	paused = false
+	cam_rig.recentre()
+
+
+func _resync_all() -> void:
+	for d in [tower_views, enemy_views, proj_views, road_views, harv_views, tank_views]:
+		for k in d:
+			if is_instance_valid(d[k]):
+				d[k].queue_free()
+		d.clear()
+	for p in puddle_views:
+		p.queue_free()
+	puddle_views.clear()
+	for t in g.towers:
+		_tower_view(t)
+
+
+func _ground_y(x: float, z: float) -> float:
+	if g == null:
+		return 0.0
+	var cx := clampi(floori(x), 0, Bal.GRID_W - 1)
+	var cy := clampi(floori(z), 0, Bal.GRID_H - 1)
+	return g.board.h(cx, cy) * Kit.LH
+
+
+# ------------------------------------------------------------------ per frame
+func _process(delta: float) -> void:
+	if g == null:
+		return
+	if playing and not paused and not hud.has_modal():
+		acc += delta * speed
+		var n := 0
+		while acc >= Bal.DT and n < MAX_STEPS_PER_FRAME:
+			if demo_bot != null:
+				demo_bot.act()
+			g.step()
+			acc -= Bal.DT
+			n += 1
+			_handle_events(g.drain_events())
+		if n == MAX_STEPS_PER_FRAME:
+			acc = 0.0
+		alpha = clampf(acc / Bal.DT, 0.0, 1.0)
+	else:
+		_handle_events(g.drain_events())
+	if g.board.version != last_road_version:
+		last_road_version = g.board.version
+		terrain.rebuild()
+		_build_core()
+	_sync_reveal(delta)
+	_sync_towers()
+	_sync_enemies(delta)
+	_sync_projectiles()
+	_sync_misc(delta)
+	if core != null:
+		core.get_node("Heart").scale = Vector3.ONE * (1.0 + 0.06 * sin(Time.get_ticks_msec() * 0.003))
+		core_ring.rotation.z += delta * 0.6
+		core_glow.light_energy = 2.0 + 1.5 * float(g.integrity) / Bal.BASE_INTEGRITY
+	var pan := Vector2(Input.get_axis("ui_left", "ui_right"), Input.get_axis("ui_up", "ui_down"))
+	if not hud.has_modal():
+		var wasd := Vector2(float(Input.is_key_pressed(KEY_D)) - float(Input.is_key_pressed(KEY_A)), float(Input.is_key_pressed(KEY_S)) - float(Input.is_key_pressed(KEY_W)))
+		cam_rig.pan_keys(wasd if wasd != Vector2.ZERO else pan, delta)
+	_update_ghost()
+	hud.refresh(g)
+	_update_selected_card()
+	if shot_path != "":
+		shot_wait -= delta
+		if shot_wait <= 0.0:
+			var img := get_viewport().get_texture().get_image()
+			img.save_png(shot_path)
+			print("saved ", shot_path)
+			get_tree().quit()
+
+
+# ------------------------------------------------------------------ events -> feedback
+func _w(x: float, y: float, lift: float = 0.5) -> Vector3:
+	return Vector3(x, _ground_y(x, y) + lift, y)
+
+
+func _glow_of(color: String) -> Color:
+	return Bal.PIECE_GLOW.get(color, Color(1.0, 0.7, 0.35))
+
+
+func _handle_events(evs: Array) -> void:
+	for e in evs:
+		match e.t:
+			"shot":
+				_on_shot(e)
+			"bolt":
+				var a := _muzzle(e.towerId, e.x1, e.y1) if e.x1 == _tower_x(e.towerId) else _w(e.x1, e.y1, 0.6)
+				var b := _w(e.x2, e.y2, 0.6)
+				fx.ribbon(a, b, 0.09, Color(0.7, 0.85, 1.0), 0.16, true, 7)
+				fx.ribbon(a, b, 0.035, Color(1, 1, 1), 0.12, true, 5)
+				fx.burst(b, 5, 3.0, Color(0.7, 0.85, 1.0), 0.06, 0.25)
+			"aura":
+				var tv: TowerView = tower_views.get(e.towerId)
+				if tv != null:
+					var t := tv.tower
+					fx.ring(_w(t.cx, t.cy, 0.15), 0.5, t.stats.range * 0.95, 0.5, Color(0.55, 0.85, 1.0, 0.45))
+			"explode":
+				var r: float = e.get("r", 1.5)
+				fx.explosion(_w(e.x, e.y, 0.3), r, _glow_of(e.get("color", "red")))
+				fx.decal(_w(e.x, e.y, 0.03), r * 0.8, Color(0.05, 0.04, 0.04, 0.55), 7.0)
+				cam_rig.add_shake(0.12 if not e.get("big", false) else 0.4)
+			"impact":
+				fx.burst(_w(e.x, e.y, 0.5), 6, 3.5, _glow_of(e.get("color", "gold")), 0.06, 0.3)
+			"puddle":
+				fx.burst(_w(e.x, e.y, 0.3), 10, 2.5, Color(0.6, 1.0, 0.3), 0.1, 0.5, "glob")
+			"hit":
+				if e.get("crit", false):
+					fx.burst(_w(e.x, e.y, 0.8), 8, 4.0, Color(1, 0.95, 0.6), 0.08, 0.35)
+			"spawn":
+				pass
+			"kill":
+				_on_kill(e)
+			"combo":
+				if e.n >= 3:
+					hud.combo(e.n)
+			"leak":
+				fx.explosion(_w(e.x, e.y, 0.6), 1.6, Color(1, 0.4, 0.3))
+				cam_rig.add_shake(0.35)
+				hud.toast("The base was hit! −%d" % e.dmg, Color(1, 0.55, 0.45), 1.6)
+			"place":
+				_on_place(e)
+			"merged":
+				var tv2: TowerView = tower_views.get(e.from)
+				if tv2 != null:
+					tv2.queue_free()
+					tower_views.erase(e.from)
+			"activate":
+				var tv3: TowerView = tower_views.get(e.towerId)
+				if tv3 != null:
+					tv3.rebuild()
+					tv3.play_activate()
+					var t3 := tv3.tower
+					fx.ring(_w(t3.cx, t3.cy, 0.1), 0.3, 3.2, 0.6, Color(1, 0.75, 0.35, 0.8))
+					fx.burst(_w(t3.cx, t3.cy, 1.2), 24, 5.0, Color(1, 0.8, 0.4), 0.08, 0.6)
+				hud.toast("%s online" % e.type, Color(1, 0.82, 0.45))
+			"bonus":
+				hud.toast(e.label, Color(0.55, 1.0, 0.7), 2.0)
+			"undo":
+				for id in tower_views.keys():
+					if g.tower_by_id(id) == null:
+						tower_views[id].queue_free()
+						tower_views.erase(id)
+				for t in g.towers:
+					if not tower_views.has(t.id):
+						_tower_view(t)
+					elif tower_views[t.id].needs_rebuild():
+						tower_views[t.id].rebuild()
+				_sync_road_pieces(true)
+				hud.toast("Undone", Color(0.8, 0.85, 1.0), 1.0)
+			"reject":
+				hud.toast(e.reason, Color(1, 0.6, 0.5), 1.4)
+			"smite":
+				var p := _w(e.x, e.y, 0.0)
+				fx.ribbon(p + Vector3(0, 60, 0), p, 1.2, Color(1, 0.85, 0.5), 0.5)
+				fx.explosion(p + Vector3(0, 0.4, 0), e.r, Color(1, 0.8, 0.4))
+				cam_rig.add_shake(0.8)
+			"mine":
+				fx.explosion(_w(e.x, e.y, 0.2), 1.3, Color(1, 0.55, 0.3))
+				cam_rig.add_shake(0.15)
+			"barrierBreak":
+				fx.burst(_w(e.x, e.y, 0.6), 18, 4.0, Color(0.55, 0.55, 0.6), 0.12, 0.7, "debris", 10.0)
+				_sync_road_pieces(true)
+			"destroyed":
+				fx.burst(_w(e.x, e.y, 0.6), 30, 6.0, Color(0.5, 0.5, 0.55), 0.14, 0.9, "debris", 10.0)
+				fx.smoke(_w(e.x, e.y, 0.4), 10)
+				_resync_all()
+			"strike":
+				cam_rig.add_shake(0.3)
+			"phase":
+				_on_phase(e.phase)
+			"waveStart":
+				hud.toast("Wave %d" % e.index, Color(1, 0.8, 0.45), 1.6)
+			"early":
+				hud.toast("Early call: +%d ◆" % int(Bal.EARLY_CALL_BONUS), Color(1, 0.85, 0.45), 1.6)
+			"ore":
+				hud.toast("+%d ore from harvesters" % int(e.amount), Color(0.85, 0.65, 0.4), 1.8)
+			"discover":
+				hud.toast("New element: %s" % e.element, Color(0.7, 0.9, 1.0), 2.0)
+			"loot":
+				fx.burst(_w(e.x, e.y, 0.8), 30, 5.0, Color(1, 0.85, 0.3), 0.1, 0.9)
+				hud.toast("Loot: +%d ◆ +%d ore" % [int(e.essence), int(e.ore)], Color(1, 0.85, 0.4))
+			"champion":
+				hud.toast("A champion approaches", Color(1, 0.6, 0.4), 2.0)
+			"build":
+				hud.toast("%s built" % Bal.BUILDINGS[e.id].name, Color(1, 0.82, 0.45))
+			"recycle":
+				hud.toast("+%d ◆" % int(e.essence), Color(1, 0.85, 0.45), 1.0)
+
+
+func _tower_x(id: int) -> float:
+	var t := g.tower_by_id(id)
+	return t.cx if t != null else -1.0
+
+
+func _muzzle(tower_id: int, x: float, y: float) -> Vector3:
+	var tv: TowerView = tower_views.get(tower_id)
+	if tv != null:
+		return tv.muzzle_world()
+	return _w(x, y, 1.0)
+
+
+func _on_shot(e: Dictionary) -> void:
+	var tv: TowerView = tower_views.get(e.towerId)
+	if tv != null:
+		tv.on_fire()
+	var a := _muzzle(e.towerId, e.x1, e.y1)
+	var b := _w(e.x2, e.y2, 0.6)
+	var c := _glow_of(e.color)
+	match e.kind:
+		"bullet":
+			fx.burst(a, 3, 2.0, Color(1, 0.8, 0.45), 0.05, 0.08)
+			if tv != null and tv.tower.type == "Machine Gun":
+				var side := Vector3(randf_range(-1, 1), 2.5, randf_range(-1, 1))
+				fx.emit("casing", a - Vector3(0, 0.2, 0), side, 2.5, 1.0, Color.WHITE, 12.0)
+		"hitscan":
+			fx.ribbon(a, b, 0.05, Color(1, 0.95, 0.75), 0.12)
+			fx.burst(a, 6, 3.0, Color(1, 0.85, 0.5), 0.06, 0.12)
+			fx.burst(b, 6, 3.0, Color(1, 0.85, 0.5), 0.06, 0.25)
+		"beam":
+			fx.ribbon(a, b, 0.12, c.lerp(Color(1, 0.3, 0.25), 0.5), 0.07)
+			fx.ribbon(a, b, 0.04, Color(1, 0.95, 0.9), 0.06)
+			if randf() < 0.3:
+				fx.burst(b, 2, 1.5, c, 0.05, 0.2)
+		"pierce":
+			fx.ribbon(a, b, 0.22, Color(0.75, 0.55, 1.0), 0.25)
+			fx.ribbon(a, b, 0.07, Color(1, 1, 1), 0.18)
+		"cone":
+			var dir := (b - a)
+			for i in 6:
+				var v := dir.normalized() * randf_range(5.0, 9.0) + Vector3(randf_range(-1, 1), randf_range(0.0, 1.2), randf_range(-1, 1)) * 1.6
+				fx.emit("spark", a, v, randf_range(0.25, 0.45), randf_range(0.12, 0.22), Color(1.0, randf_range(0.35, 0.6), 0.15), -1.5, 1.5, 1.2)
+			if randf() < 0.3:
+				fx.smoke(a + (b - a) * 0.6, 1, Color(0.3, 0.3, 0.32, 0.4), 0.3, 1.0, 1.2)
+		"lob", "puddle":
+			fx.smoke(a, 3, Color(0.6, 0.6, 0.62, 0.5), 0.18, 0.7, 0.6)
+			fx.burst(a, 4, 2.0, Color(1, 0.7, 0.35), 0.07, 0.12)
+		"homing":
+			fx.smoke(a, 2, Color(0.7, 0.7, 0.72, 0.5), 0.15, 0.6, 0.3)
+		"virus":
+			fx.ribbon(a, b, 0.06, Color(0.6, 1.0, 0.4), 0.2, true, 3)
+			fx.burst(b, 6, 1.5, Color(0.6, 1.0, 0.4), 0.07, 0.4, "glob", 1.0)
+		"ricochet", "tank":
+			fx.ribbon(a if e.kind == "tank" else _w(e.x1, e.y1, 0.6), b, 0.05, Color(1, 0.85, 0.4), 0.1)
+		_:
+			fx.burst(a, 3, 2.0, c, 0.05, 0.1)
+
+
+func _on_kill(e: Dictionary) -> void:
+	var p := _w(e.x, e.y, 0.5)
+	var col := EnemyView.suit_color(e.suit, e.size)
+	var big: bool = e.size in ["large", "giant", "champion", "boss"]
+	var n := 26 if big else 12
+	fx.burst(p, n, 4.5 if big else 3.5, col, 0.14 if big else 0.1, 0.7, "glob", 9.0)
+	fx.burst(p + Vector3(0, 0.3, 0), 6, 3.0, Color(1, 0.9, 0.6), 0.05, 0.3)
+	fx.decal(_w(e.x, e.y, 0.02), 0.5 if not big else 1.2, Color(col.r * 0.5, col.g * 0.5, col.b * 0.5, 0.55), 5.0)
+	if big:
+		cam_rig.add_shake(0.25)
+	var ev: EnemyView = enemy_views.get(e.id)
+	if ev != null:
+		ev.queue_free()
+		enemy_views.erase(e.id)
+
+
+func _on_place(e: Dictionary) -> void:
+	var col := _glow_of(e.color)
+	var sum := Vector2.ZERO
+	for c in e.cells:
+		sum += Vector2(c.x + 0.5, c.y + 0.5)
+	var ctr: Vector2 = sum / float(e.cells.size())
+	var p := _w(ctr.x, ctr.y, 0.3)
+	fx.burst(p, 10, 2.5, col, 0.07, 0.4)
+	fx.smoke(p, 4, Color(0.6, 0.58, 0.55, 0.45), 0.2, 0.8, 0.4)
+	cam_rig.add_nudge(Vector3(0, -0.15, 0))
+	match e.kind:
+		"tower", "story":
+			var t := g.tower_by_id(e.towerId)
+			if t != null:
+				if tower_views.has(t.id):
+					tower_views[t.id].rebuild()
+				else:
+					_tower_view(t)
+		"barrier", "mine":
+			_sync_road_pieces(true)
+		"harvester":
+			_sync_harvesters()
+
+
+func _on_phase(p: String) -> void:
+	if demo_bot != null:
+		if p == "reveal":
+			last_revealed = 0
+			_resync_all()
+		return
+	match p:
+		"calm":
+			if g.wave_index == 0:
+				hud.toast("Board %d" % g.board_no, Color(1, 0.82, 0.45), 2.0)
+		"cleared":
+			_sync_road_pieces(true)
+			SaveIO.log_metrics(g.metrics)
+			_cleared_screen()
+		"base":
+			_base_screen()
+		"reveal":
+			last_revealed = 0
+			_resync_all()
+			_build_core()
+			if playing:
+				SaveIO.save_run(g)
+				meta.discovered = g.discovered.keys()
+				meta.elements = g.discovered_elements.keys()
+				SaveIO.save_meta(meta)
+		"lost":
+			SaveIO.log_metrics(g.metrics)
+			_lost_screen()
+		"victory":
+			SaveIO.log_metrics(g.metrics)
+			SaveIO.clear_run()
+			_victory_screen()
+
+
+# ------------------------------------------------------------------ road reveal: lightning
+func _macro_centre(m: int) -> Vector2:
+	var v := Board.mxy(m)
+	return Vector2(v.x * Bal.MACRO + Bal.MACRO / 2.0, v.y * Bal.MACRO + Bal.MACRO / 2.0)
+
+
+func _sync_reveal(delta: float) -> void:
+	if g.phase != "reveal" or g.board.pending.is_empty():
+		return
+	var pend: Dictionary = g.board.pending
+	var rv: int = pend.revealed
+	bolt_t -= delta
+	if rv > last_revealed:
+		for i in range(maxi(1, last_revealed), rv):
+			var a: Vector2 = pend.start if i == 1 else _macro_centre(pend.path[i - 2])
+			if i - 1 < pend.path.size():
+				var b := _macro_centre(pend.path[i - 1])
+				_strike(a, b)
+		last_revealed = rv
+	if bolt_t <= 0.0 and rv >= 1:
+		bolt_t = 0.12
+		var k := randi_range(0, rv - 1)
+		var a2: Vector2 = pend.start if k == 0 else _macro_centre(pend.path[k - 1])
+		var b2 := _macro_centre(pend.path[mini(k, pend.path.size() - 1)])
+		fx.ribbon(_w(a2.x, a2.y, 0.3), _w(b2.x, b2.y, 0.3), 0.08, Color(0.75, 0.85, 1.0, 0.7), 0.1, true, 9)
+
+
+func _strike(a: Vector2, b: Vector2) -> void:
+	var pa := _w(a.x, a.y, 0.2)
+	var pb := _w(b.x, b.y, 0.2)
+	fx.ribbon(pb + Vector3(0, 40, 0), pb, 0.5, Color(0.8, 0.9, 1.0), 0.25, true, 12)
+	fx.ribbon(pa, pb, 0.25, Color(0.7, 0.85, 1.0), 0.35, true, 14)
+	fx.burst(pb, 30, 7.0, Color(0.8, 0.9, 1.0), 0.08, 0.5)
+	fx.smoke(pb, 8, Color(0.4, 0.42, 0.48, 0.5), 0.5, 1.6, 0.7)
+	fx.decal(pb, 1.4, Color(0.05, 0.05, 0.07, 0.6), 3.0)
+	cam_rig.add_shake(0.25)
+
+
+# ------------------------------------------------------------------ view sync
+func _tower_view(t: SimTower) -> TowerView:
+	var tv := TowerView.new()
+	tower_root.add_child(tv)
+	tv.setup(t, terrain)
+	tower_views[t.id] = tv
+	return tv
+
+
+func _sync_towers() -> void:
+	for t in g.towers:
+		var tv: TowerView = tower_views.get(t.id)
+		if tv == null:
+			_tower_view(t)
+		elif tv.needs_rebuild():
+			tv.rebuild()
+	if tower_views.size() > g.towers.size():
+		for id in tower_views.keys():
+			if g.tower_by_id(id) == null:
+				tower_views[id].queue_free()
+				tower_views.erase(id)
+
+
+func _sync_enemies(delta: float) -> void:
+	var seen := {}
+	for e in g.enemies:
+		seen[e.id] = true
+		var ev: EnemyView = enemy_views.get(e.id)
+		if ev == null:
+			ev = EnemyView.new()
+			enemy_root.add_child(ev)
+			ev.setup(e, terrain)
+			enemy_views[e.id] = ev
+		ev.sync(alpha, delta)
+	if enemy_views.size() > seen.size():
+		for id in enemy_views.keys():
+			if not seen.has(id):
+				var ev2: EnemyView = enemy_views[id]
+				if ev2.e != null and ev2.e.leaked:
+					pass
+				ev2.queue_free()
+				enemy_views.erase(id)
+
+
+func _proj_mesh(p: SimProjectile) -> MeshInstance3D:
+	var m := MeshInstance3D.new()
+	match p.kind:
+		"bullet":
+			m.mesh = Kit.sphere(0.07, 6)
+			m.material_override = Kit.glow(Color(1, 0.8, 0.45), 4.0)
+		"homing":
+			m.mesh = Kit.cylinder(0.06, 0.08, 0.45, 6)
+			m.material_override = Kit.iron()
+			var flame := Kit.add(m, Kit.sphere(0.09, 6), Kit.glow(Color(1, 0.6, 0.2), 6.0), Vector3(0, -0.28, 0))
+			flame.name = "Flame"
+		"lob":
+			m.mesh = Kit.sphere(0.18, 10)
+			m.material_override = Kit.dark_iron()
+			Kit.add(m, Kit.sphere(0.05, 6), Kit.glow(Color(1, 0.6, 0.25), 6.0), Vector3(0, 0.17, 0))
+		"acid":
+			m.mesh = Kit.sphere(0.16, 10)
+			m.material_override = Kit.glow(Color(0.55, 1.0, 0.3), 2.5)
+		_:
+			m.mesh = Kit.sphere(0.08, 6)
+			m.material_override = Kit.glow(_glow_of(p.color), 3.0)
+	proj_root.add_child(m)
+	return m
+
+
+func _sync_projectiles() -> void:
+	var seen := {}
+	for p in g.projectiles:
+		seen[p.id] = true
+		var m: MeshInstance3D = proj_views.get(p.id)
+		if m == null:
+			m = _proj_mesh(p)
+			proj_views[p.id] = m
+		var x := lerpf(p.px, p.x, alpha)
+		var y := lerpf(p.py, p.y, alpha)
+		var lift := 0.7
+		if p.kind == "lob" or p.kind == "acid":
+			var k := clampf(p.t / maxf(p.dur, 0.001), 0.0, 1.0)
+			lift = 0.7 + sin(k * PI) * (2.0 + p.dur * 2.0)
+		var pos := _w(x, y, lift)
+		var prev: Vector3 = m.position
+		m.position = pos
+		if p.kind == "homing" and prev.distance_squared_to(pos) > 1e-6:
+			m.look_at(pos + (pos - prev), Vector3.UP)
+			m.rotate_object_local(Vector3.RIGHT, -PI / 2.0)
+			if randf() < 0.5:
+				fx.emit("puff", pos, Vector3(0, 0.4, 0), 0.6, 0.12, Color(0.75, 0.75, 0.78, 0.45), 0.0, 1.0, 1.5)
+		elif p.kind == "bullet" and randf() < 0.25:
+			fx.ribbon(prev, pos, 0.03, Color(1, 0.8, 0.45, 0.6), 0.05)
+	if proj_views.size() > seen.size():
+		for id in proj_views.keys():
+			if not seen.has(id):
+				proj_views[id].queue_free()
+				proj_views.erase(id)
+
+
+func _sync_road_pieces(force: bool = false) -> void:
+	var seen := {}
+	for rp in g.road_pieces:
+		seen[rp.id] = true
+		if road_views.has(rp.id) and not force:
+			continue
+		if road_views.has(rp.id):
+			continue
+		var n := Node3D.new()
+		misc_root.add_child(n)
+		road_views[rp.id] = n
+		for c in rp.cells:
+			var base := _w(c.x + 0.5, c.y + 0.5, 0.0)
+			if rp.kind == "barrier":
+				Kit.add(n, Kit.bevel_box(Vector3(0.92, 0.7, 0.92), 0.08), Kit.stone(Color(0.26, 0.27, 0.3)), base + Vector3(0, 0.35, 0))
+				Kit.add(n, Kit.box(Vector3(0.94, 0.06, 0.94)), Kit.dark_iron(), base + Vector3(0, 0.55, 0))
+			else:
+				var mine := Kit.add(n, Kit.cylinder(0.22, 0.26, 0.12, 10), Kit.dark_iron(), base + Vector3(0, 0.06, 0))
+				Kit.add(mine, Kit.sphere(0.05, 6), Kit.glow(Color(1, 0.35, 0.2), 4.0), Vector3(0, 0.08, 0))
+	for id in road_views.keys():
+		if not seen.has(id):
+			road_views[id].queue_free()
+			road_views.erase(id)
+	# spent mines disappear
+	for rp in g.road_pieces:
+		if rp.kind == "mine" and road_views.has(rp.id):
+			var n2: Node3D = road_views[rp.id]
+			for i in mini(n2.get_child_count(), rp.mines.size()):
+				(n2.get_child(i) as Node3D).visible = rp.mines[i]
+
+
+func _sync_harvesters() -> void:
+	var seen := {}
+	for h in g.harvesters:
+		seen[h.id] = true
+		if harv_views.has(h.id):
+			continue
+		var n := Node3D.new()
+		misc_root.add_child(n)
+		harv_views[h.id] = n
+		var mat := Kit.piece_block(h.piece.color, h.piece.golden)
+		for c in h.cells:
+			var base := _w(c.x + 0.5, c.y + 0.5, 0.0)
+			Kit.add(n, Kit.bevel_box(Vector3(0.9, 0.3, 0.9), 0.06), mat, base + Vector3(0, 0.15, 0))
+			var drill := Kit.add(n, Kit.cone(0.18, 0.5, 8), Kit.brass(), base + Vector3(0, 0.55, 0), Vector3(PI, 0, 0))
+			drill.name = "Drill"
+	for id in harv_views.keys():
+		if not seen.has(id):
+			harv_views[id].queue_free()
+			harv_views.erase(id)
+
+
+func _sync_misc(delta: float) -> void:
+	_sync_road_pieces()
+	_sync_harvesters()
+	for id in harv_views:
+		for c in harv_views[id].get_children():
+			if c.name.begins_with("Drill"):
+				c.rotation.y += delta * 4.0
+	# tanks
+	var seen := {}
+	for k in g.tanks:
+		seen[k.id] = true
+		var n: Node3D = tank_views.get(k.id)
+		if n == null:
+			n = Node3D.new()
+			misc_root.add_child(n)
+			Kit.add(n, Kit.bevel_box(Vector3(0.9, 0.35, 0.6), 0.06), Kit.dark_iron(), Vector3(0, 0.25, 0))
+			Kit.add(n, Kit.cylinder(0.2, 0.22, 0.2, 10), Kit.iron(), Vector3(0, 0.5, 0))
+			Kit.add(n, Kit.cylinder(0.04, 0.04, 0.5, 6), Kit.iron(), Vector3(0.3, 0.52, 0), Vector3(0, 0, PI / 2.0))
+			tank_views[k.id] = n
+		n.position = _w(lerpf(k.px, k.x, alpha), lerpf(k.py, k.y, alpha), 0.0)
+		n.rotation.y = -k.dir
+	for id in tank_views.keys():
+		if not seen.has(id):
+			tank_views[id].queue_free()
+			tank_views.erase(id)
+	# acid puddles
+	while puddle_views.size() < g.puddles.size():
+		var m := MeshInstance3D.new()
+		m.mesh = Kit.cylinder(1.0, 1.0, 0.04, 24)
+		m.material_override = Kit.glow(Color(0.45, 0.9, 0.2, 0.6), 1.2)
+		misc_root.add_child(m)
+		puddle_views.append(m)
+	for i in puddle_views.size():
+		var m2 := puddle_views[i]
+		m2.visible = i < g.puddles.size()
+		if m2.visible:
+			var pd: Dictionary = g.puddles[i]
+			m2.position = _w(pd.x, pd.y, 0.04)
+			var s: float = pd.r * clampf(pd.t / 0.5, 0.2, 1.0)
+			m2.scale = Vector3(s, 1, s)
+
+
+# ------------------------------------------------------------------ placement ghost
+func _cur_piece() -> Variant:
+	if selected.is_empty():
+		return null
+	return g.get_piece(selected)
+
+
+func _update_ghost() -> void:
+	var p: Variant = _cur_piece()
+	if p == null and not selected.is_empty():
+		selected = {}
+	var cell := _cell_under(mouse_pos)
+	hover = cell
+	if p == null or not playing or hud.has_modal() or cell.x < -100:
+		ghost.visible = false
+		hud.set_hint("" if p == null else "[color=#8a93a6]Point at the ground to place[/color]")
+		_update_range_preview(null)
+		return
+	var sig := "%d|%d|%s|%d,%d|%d" % [p.id, rot, str(mirror), cell.x, cell.y, g.towers.size() + g.board.version * 1000]
+	ghost.visible = true
+	if sig == ghost_sig:
+		return
+	ghost_sig = sig
+	for c in ghost.get_children():
+		c.queue_free()
+	var pv := g.preview(p, rot, mirror, cell.x, cell.y)
+	var ok: bool = pv.get("ok", false)
+	var mat := Kit.ghost_mat(ok)
+	var body := Kit.piece_block(p.color, p.golden) if ok else mat
+	for c in pv.get("cells", []):
+		var top := 0.0
+		if Board.in_grid(c.x, c.y):
+			top = g.board.h(c.x, c.y) * Kit.LH
+			var tid := g.tower_at[Board.cell_idx(c.x, c.y)]
+			if tid != 0 and pv.get("kind", "") == "story":
+				var t := g.tower_by_id(tid)
+				if t != null:
+					top += g.level_at(t, c.x, c.y) * Kit.BLOCK_H
+		Kit.add(ghost, Kit.bevel_box(Vector3(0.94, Kit.BLOCK_H, 0.94), 0.05), mat if not ok else body, Vector3(c.x + 0.5, top + Kit.BLOCK_H * 0.5 + 0.02, c.y + 0.5))
+		if ok:
+			var gm := Kit.add(ghost, Kit.box(Vector3(0.98, 0.03, 0.98)), Kit.unshaded(Color(1, 0.8, 0.4, 0.35), true), Vector3(c.x + 0.5, top + 0.02, c.y + 0.5))
+			gm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	for c in ghost.get_children():
+		if c is GeometryInstance3D:
+			(c as GeometryInstance3D).transparency = 0.35 if ok else 0.45
+	# hint text: what this placement will do
+	var txt := ""
+	if not ok:
+		txt = "[color=#ff8a7a]%s[/color]" % pv.get("reason", "Can't place here")
+	else:
+		match pv.get("kind", ""):
+			"tower":
+				if pv.resultType != "":
+					txt = "[b]%s[/b]  [color=#8a93a6]%s · DPS %.0f · range %.1f[/color]" % [pv.resultType, pv.hint, pv.dps, pv.range]
+				else:
+					txt = "Pile: %d more core piece%s to make a tower" % [pv.needs, "" if pv.needs == 1 else "s"]
+			"story":
+				txt = "[b]Story %d[/b] on %s  [color=#8a93a6]DPS %.0f · range %.1f[/color]" % [pv.get("layer", 1) + 1, pv.get("resultType", ""), pv.get("dps", 0.0), pv.get("range", 0.0)]
+			_:
+				txt = ", ".join(pv.get("gained", []))
+		var extra: PackedStringArray = []
+		for s in pv.get("gained", []):
+			if pv.get("kind", "") in ["tower", "story"]:
+				extra.append("[color=#7dffb0]+ %s[/color]" % s)
+		for s in pv.get("lost", []):
+			extra.append("[color=#ff8a7a]− %s[/color]" % s)
+		if not extra.is_empty():
+			txt += "\n" + "   ".join(extra)
+	hud.set_hint(txt + "\n[color=#8a93a6]R rotate · F mirror · H hold · right-click a slot to hold[/color]")
+	_update_range_preview(pv if ok else null)
+
+
+func _update_range_preview(pv: Variant) -> void:
+	if pv != null and pv.get("range", 0.0) > 0.0:
+		var c := Vector2.ZERO
+		for cc in pv.cells:
+			c += Vector2(cc.x + 0.5, cc.y + 0.5)
+		c /= float(pv.cells.size())
+		_show_ring(c, pv.range)
+	elif selected_tower != 0:
+		var t := g.tower_by_id(selected_tower)
+		if t != null and not t.stats.is_empty():
+			_show_ring(Vector2(t.cx, t.cy), t.stats.range)
+		else:
+			range_ring.visible = false
+	else:
+		range_ring.visible = false
+
+
+func _show_ring(c: Vector2, r: float) -> void:
+	range_ring.visible = true
+	range_ring.position = _w(c.x, c.y, 0.08)
+	range_ring.scale = Vector3(r, 1.0, r)
+
+
+func _cell_under(screen: Vector2) -> Vector2i:
+	# march down terrain levels from the top so raised terraces are hit first
+	for lvl in range(4, -1, -1):
+		var hit: Variant = cam_rig.ground_at(screen, lvl * Kit.LH)
+		if hit == null:
+			continue
+		var x := floori(hit.x)
+		var y := floori(hit.z)
+		if Board.in_grid(x, y) and g.board.h(x, y) == lvl:
+			return Vector2i(x, y)
+	var h0: Variant = cam_rig.ground_at(screen, 0.0)
+	if h0 == null:
+		return Vector2i(-999, -999)
+	return Vector2i(floori(h0.x), floori(h0.z))
+
+
+# ------------------------------------------------------------------ HUD callbacks
+func select_source(s: Dictionary) -> void:
+	if g.get_piece(s) == null:
+		return
+	if s.zone == "may" and g.may_locked():
+		hud.toast("Place your MUST USE pieces first", Color(1, 0.7, 0.5), 1.4)
+		return
+	if selected == s:
+		selected = {}
+	else:
+		selected = s
+		selected_tower = 0
+		hud.hide_card()
+	ghost_sig = ""
+
+
+func hold_swap(s: Dictionary) -> void:
+	if g.hold_swap(s):
+		selected = {}
+		ghost_sig = ""
+
+
+func discard_selected() -> void:
+	if selected.is_empty():
+		return
+	var ok := g.recycle(selected) if g.can_recycle() else g.discard(selected)
+	if ok:
+		selected = {}
+		ghost_sig = ""
+
+
+func call_ready() -> void:
+	if g.phase == "calm":
+		g.ready()
+
+
+func set_speed(s: float) -> void:
+	speed = s
+	settings.speed = s
+	SaveIO.save_settings(settings)
+
+
+func toggle_pause() -> void:
+	if hud.has_modal():
+		return
+	paused = true
+	_pause_screen()
+
+
+func _update_selected_card() -> void:
+	if selected_tower != 0:
+		var t := g.tower_by_id(selected_tower)
+		if t == null:
+			selected_tower = 0
+			hud.hide_card()
+		else:
+			hud.show_tower(t, g)
+
+
+# ------------------------------------------------------------------ input
+func _unhandled_input(ev: InputEvent) -> void:
+	if g == null:
+		return
+	if ev is InputEventMouseMotion:
+		mouse_pos = ev.position
+		if pan_drag:
+			cam_rig.pan(ev.relative)
+			pan_moved += ev.relative.length()
+		return
+	if ev is InputEventMouseButton:
+		mouse_pos = ev.position
+		match ev.button_index:
+			MOUSE_BUTTON_WHEEL_UP:
+				if ev.pressed:
+					cam_rig.zoom_at(0.88, ev.position)
+			MOUSE_BUTTON_WHEEL_DOWN:
+				if ev.pressed:
+					cam_rig.zoom_at(1.0 / 0.88, ev.position)
+			MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE:
+				if ev.pressed:
+					pan_drag = true
+					pan_moved = 0.0
+				else:
+					pan_drag = false
+					if pan_moved < 6.0 and ev.button_index == MOUSE_BUTTON_RIGHT:
+						_cancel()
+			MOUSE_BUTTON_LEFT:
+				if ev.pressed and playing and not hud.has_modal():
+					_click(ev.position)
+		return
+	if ev is InputEventKey and ev.pressed and not ev.echo:
+		_key(ev.keycode)
+
+
+func _click(pos: Vector2) -> void:
+	var cell := _cell_under(pos)
+	var p: Variant = _cur_piece()
+	if p != null:
+		var res := g.place(selected, rot, mirror, cell.x, cell.y)
+		if res.get("ok", false):
+			ghost_sig = ""
+			if g.get_piece(selected) == null:
+				selected = _auto_next()
+		return
+	# select a tower
+	if Board.in_grid(cell.x, cell.y):
+		var tid := g.tower_at[Board.cell_idx(cell.x, cell.y)]
+		selected_tower = tid
+		if tid == 0:
+			hud.hide_card()
+
+
+## After placing, keep the next MUST USE piece in hand so the flow stays fast.
+func _auto_next() -> Dictionary:
+	if not g.must.is_empty():
+		return {"zone": "must", "index": 0}
+	return {}
+
+
+func _cancel() -> void:
+	if not selected.is_empty():
+		selected = {}
+		ghost_sig = ""
+	elif selected_tower != 0:
+		selected_tower = 0
+		hud.hide_card()
+
+
+func _key(k: Key) -> void:
+	if hud.has_modal():
+		if k == KEY_ESCAPE and paused:
+			_resume()
+		return
+	match k:
+		KEY_R:
+			rot = (rot + 1) % 4
+			ghost_sig = ""
+		KEY_F:
+			mirror = not mirror
+			ghost_sig = ""
+		KEY_H:
+			if not selected.is_empty():
+				hold_swap(selected)
+			elif g.hold != null:
+				select_source({"zone": "hold", "index": 0})
+		KEY_SPACE, KEY_ENTER, KEY_KP_ENTER:
+			call_ready()
+		KEY_ESCAPE:
+			if g.undo_left() > 0.0:
+				g.undo()
+			elif not selected.is_empty() or selected_tower != 0:
+				_cancel()
+			else:
+				toggle_pause()
+		KEY_P:
+			toggle_pause()
+		KEY_Q:
+			cam_rig.rotate_step(-1)
+		KEY_E:
+			cam_rig.rotate_step(1)
+		KEY_HOME:
+			cam_rig.recentre()
+		KEY_1, KEY_2, KEY_3:
+			select_source({"zone": "must", "index": k - KEY_1})
+		KEY_4, KEY_5, KEY_6, KEY_7:
+			select_source({"zone": "may", "index": k - KEY_4})
+		KEY_BRACKETLEFT:
+			set_speed(SPEEDS[maxi(0, SPEEDS.find(speed) - 1)])
+		KEY_BRACKETRIGHT:
+			set_speed(SPEEDS[mini(SPEEDS.size() - 1, SPEEDS.find(speed) + 1)])
+
+
+# ------------------------------------------------------------------ screens
+func _title_screen() -> void:
+	playing = false
+	var has_save := not SaveIO.load_run().is_empty()
+	var body := "[color=#c9cfdc]Build towers from falling pieces. Every shape matters.[/color]\n\n[color=#8a93a6]Relaxed: monsters ×0.618 HP · Normal · Golden: ×1.618 HP[/color]"
+	var buttons: Array = []
+	if has_save:
+		buttons.append(["Continue", continue_run])
+	buttons.append(["Relaxed", func(): start_run("relaxed", not meta.tutorialDone)])
+	buttons.append(["Normal", func(): start_run("normal", not meta.tutorialDone)])
+	buttons.append(["Golden", func(): start_run("golden", false)])
+	var vb := hud.open_modal("Satisfying TD", body, buttons, 560)
+	var hb2 := HBoxContainer.new()
+	var st := Button.new()
+	st.text = "Settings"
+	st.pressed.connect(_settings_screen.bind(true))
+	hb2.add_child(st)
+	var v1 := Button.new()
+	v1.text = "Play v1.1 (web)"
+	v1.tooltip_text = "The original 2D version"
+	v1.pressed.connect(func(): OS.shell_open("https://omnivore99.github.io/TowerDefense/v1/"))
+	hb2.add_child(v1)
+	vb.add_child(hb2)
+
+
+func _pause_screen() -> void:
+	hud.open_modal("Paused", "[color=#8a93a6]Board %d · wave %d[/color]" % [g.board_no, g.wave_index], [
+		["Resume", _resume],
+		["Settings", _settings_screen.bind(false)],
+		["Restart board", func():
+			hud.close_modal()
+			paused = false
+			g.retry_board()
+			_resync_all()],
+		["Main menu", func():
+			SaveIO.save_run(g)
+			_title_screen()],
+	])
+
+
+func _resume() -> void:
+	paused = false
+	hud.close_modal()
+
+
+func _settings_screen(from_title: bool) -> void:
+	var vb := hud.open_modal("Settings", "", [["Done", func():
+		SaveIO.save_settings(settings)
+		cam_rig.reduced_motion = settings.reducedMotion
+		fx.reduced_motion = settings.reducedMotion
+		cam_rig.sensitivity = float(settings.camSensitivity)
+		if from_title:
+			_title_screen()
+		else:
+			_pause_screen()]], 460)
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 16)
+	vb.add_child(grid)
+	vb.move_child(grid, 1)
+	for key in ["volume", "music", "camSensitivity"]:
+		var l := Label.new()
+		l.text = {"volume": "Sound volume", "music": "Music volume", "camSensitivity": "Camera speed"}[key]
+		grid.add_child(l)
+		var s := HSlider.new()
+		s.min_value = 0.0 if key != "camSensitivity" else 0.3
+		s.max_value = 1.0 if key != "camSensitivity" else 2.5
+		s.step = 0.05
+		s.value = float(settings[key])
+		s.custom_minimum_size = Vector2(200, 24)
+		s.value_changed.connect(func(v: float): settings[key] = v)
+		grid.add_child(s)
+	for key in ["reducedMotion", "showRanges", "colourBlind"]:
+		var l2 := Label.new()
+		l2.text = {"reducedMotion": "Reduced motion (no shake)", "showRanges": "Always show ranges", "colourBlind": "Colour-blind glyph marks"}[key]
+		grid.add_child(l2)
+		var c := CheckBox.new()
+		c.button_pressed = bool(settings[key])
+		c.toggled.connect(func(v: bool): settings[key] = v)
+		grid.add_child(c)
+
+
+func _cleared_screen() -> void:
+	var lost := Bal.BASE_INTEGRITY - g.integrity
+	var body := "Base integrity %d / %d%s\nEssence [color=#ffcf6b]%d ◆[/color] · Ore %d\n\n[color=#8a93a6]The next square of your base unlocks.[/color]" % [g.integrity, Bal.BASE_INTEGRITY, "  (−%d)" % lost if lost > 0 else "  flawless!", int(g.base.essence), int(g.base.ore)]
+	hud.open_modal("Board %d cleared" % g.board_no, body, [["To the base", func():
+		hud.close_modal()
+		g.enter_base()]])
+
+
+func _base_screen() -> void:
+	var vb := hud.open_modal("Your base", "Essence [color=#ffcf6b]%d ◆[/color] · Ore %d" % [int(g.base.essence), int(g.base.ore)], [
+		["Convert ore → ◆", func():
+			g.convert_ore()
+			_base_screen()],
+		["Next board ▶", func():
+			hud.close_modal()
+			g.next_board()],
+	], 720)
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 12)
+	grid.add_theme_constant_override("v_separation", 6)
+	vb.add_child(grid)
+	vb.move_child(grid, 2)
+	for i in Bal.BASE_SQUARES.size():
+		var sq: Dictionary = Bal.BASE_SQUARES[i]
+		var l := Label.new()
+		var b: String = g.base.buildings[i]
+		if i >= g.base.unlocked:
+			l.text = "Square %d (size %d): locked" % [i + 1, sq.size]
+			l.add_theme_color_override("font_color", Color(0.5, 0.52, 0.58))
+			grid.add_child(l)
+			grid.add_child(Control.new())
+			continue
+		l.text = "Square %d (size %d)%s: %s" % [i + 1, sq.size, " ★" if g.is_harmony(i) else "", Bal.BUILDINGS[b].name if b != "" else "empty"]
+		grid.add_child(l)
+		if b != "":
+			grid.add_child(Control.new())
+			continue
+		var ob := OptionButton.new()
+		ob.add_item("Build…")
+		var ids: Array = []
+		for id in Bal.BUILDINGS:
+			if g.can_build(i, id) == "":
+				ob.add_item("%s (%d ◆): %s" % [Bal.BUILDINGS[id].name, Bal.BUILDINGS[id].cost, Bal.BUILDINGS[id].effect])
+				ids.append(id)
+		ob.disabled = ids.is_empty()
+		ob.item_selected.connect(func(idx: int):
+			if idx > 0:
+				g.build(i, ids[idx - 1])
+				_base_screen())
+		grid.add_child(ob)
+
+
+func _lost_screen() -> void:
+	hud.open_modal("The base fell", "[color=#8a93a6]Board %d, wave %d. Try the board again from its start: your towers and base come back as they were.[/color]" % [g.board_no, g.wave_index], [
+		["Retry board", func():
+			hud.close_modal()
+			g.retry_board()
+			_resync_all()],
+		["Main menu", _title_screen],
+	])
+
+
+func _victory_screen() -> void:
+	meta.tutorialDone = true
+	SaveIO.save_meta(meta)
+	hud.open_modal("Victory!", "All %d boards held. [color=#ffcf6b]%d ◆[/color] left in the vault." % [Bal.BOARDS, int(g.base.essence)], [
+		["Main menu", _title_screen],
+	])
