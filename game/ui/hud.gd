@@ -21,6 +21,10 @@ var may_slots: Array[Button] = []
 var hold_slot: Button
 var discard_btn: Button
 var card: PanelContainer
+var hover_panel: PanelContainer  ## tower stats next to the cursor
+var hover_text: RichTextLabel
+var enemy_panel: PanelContainer  ## monster stats at the top of the screen
+var enemy_text: RichTextLabel
 var card_text: RichTextLabel
 var hint: RichTextLabel
 var tutorial_panel: PanelContainer
@@ -72,6 +76,7 @@ func _ready() -> void:
 	_build_left()
 	_build_card()
 	_build_bottom()
+	_build_hover()
 	toasts = VBoxContainer.new()
 	toasts.set_anchors_preset(Control.PRESET_CENTER_TOP)
 	toasts.offset_left = -260
@@ -522,6 +527,117 @@ func combo(n: int) -> void:
 	combo_label.pivot_offset = combo_label.size / 2.0
 	var tw := create_tween()
 	tw.tween_property(combo_label, "scale", Vector2.ONE, Bal.T_M).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+# ----------------------------------------------------------------- hover pop-ups
+func _build_hover() -> void:
+	hover_panel = _panel(self)
+	hover_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hover_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	hover_text = _rich(hover_panel)
+	hover_panel.visible = false
+	enemy_panel = _panel(self)
+	enemy_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	enemy_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	enemy_text = _rich(enemy_panel)
+	enemy_panel.visible = false
+
+
+## Compact tower stats beside the cursor.
+func show_hover_tower(t: SimTower, mouse: Vector2) -> void:
+	if t == null:
+		hover_panel.visible = false
+		return
+	var lines: PackedStringArray = []
+	if t.stats.is_empty():
+		lines.append("[b]Unfinished pile[/b]  [color=#8a93a6]%d of 3 core pieces[/color]" % t.core_count())
+	else:
+		var s := t.stats
+		var bd := Evolve.branch_def(t)
+		var mk: String = ["I", "II", "III", "IV"][t.mark - 1]
+		var name_txt: String = bd.name if (t.mark >= 3 and not bd.is_empty()) else t.type
+		lines.append("[b]%s[/b]  [color=#ffcf6b]Mk %s[/color]" % [name_txt, mk])
+		lines.append("DPS [b]%.0f[/b]  ·  Damage [b]%.0f[/b] / %.2f s" % [s.dps, s.damage, s.interval])
+		lines.append("Range [b]%.1f[/b]  ·  Stories [b]%d[/b]%s" % [s.range, s.stories, ("  ·  hits air" if t.air else "")])
+		var extra: PackedStringArray = []
+		if int(s.get("chain", 0)) > 0:
+			extra.append("chains %d" % int(s.chain))
+		if float(s.get("critChance", 0.0)) > 0.0:
+			extra.append("crit %d%%" % roundi(float(s.critChance) * 100.0))
+		if t.aura_mult > 1.001:
+			extra.append("amplified +%d%%" % roundi((t.aura_mult - 1.0) * 100.0))
+		if not extra.is_empty():
+			lines.append("[color=#a8c8ff]%s[/color]" % ", ".join(extra))
+		lines.append("Kills [b]%d[/b]  ·  Target [b]%s[/b]" % [t.kills, Bal.PRIORITY_LABEL.get(t.priority, "First")])
+		if t.corroded:
+			lines.append("[color=#b6ff5c]Corroded: firing at 70%[/color]")
+		lines.append("[color=#8a93a6]Click for details[/color]")
+	hover_text.text = "\n".join(lines)
+	hover_panel.visible = true
+	hover_panel.reset_size()
+	var vp := get_viewport_rect().size
+	var pos := mouse + Vector2(22, 18)
+	if pos.x + hover_panel.size.x > vp.x - 8:
+		pos.x = mouse.x - hover_panel.size.x - 16
+	if pos.y + hover_panel.size.y > vp.y - 8:
+		pos.y = mouse.y - hover_panel.size.y - 12
+	hover_panel.position = pos
+
+
+## Monster stats in a window at the top of the screen.
+func show_enemy(e: SimEnemy, g: Game) -> void:
+	if e == null or not e.alive:
+		if enemy_panel.visible:
+			enemy_panel.visible = false
+			toasts.offset_top = 84
+		return
+	var grp: Dictionary = Bal.GROUPS.get(e.group, {})
+	var title := "%s %s" % [e.size.capitalize(), e.arch]
+	var tags: PackedStringArray = []
+	if e.boss:
+		tags.append("[color=#ff7a6b]BOSS[/color]")
+	if e.champion:
+		tags.append("[color=#ffb86b]CHAMPION[/color]")
+	if e.golden:
+		tags.append("[color=#ffe08a]GOLDEN[/color]")
+	var lines: PackedStringArray = []
+	lines.append("[font_size=18][b]%s[/b][/font_size]  [color=#8a93a6]%s · tier %s[/color]  %s" % [title, e.element, ["I", "II", "III", "IV"][clampi(e.tier - 1, 0, 3)], " ".join(tags)])
+	var hp_txt := "HP [b]%s[/b] / %s" % [_num(e.hp), _num(e.max_hp)]
+	if e.shield_max > 0.0 or e.shield > 0.0:
+		hp_txt += "  ·  Shield [b]%s[/b]" % _num(e.shield)
+	var spd := e.speed * e.slow_mult
+	hp_txt += "  ·  Speed [b]%.1f[/b]%s" % [spd, (" [color=#9fd8ff](slowed)[/color]" if e.slow_mult < 0.999 else "")]
+	lines.append(hp_txt)
+	if not grp.is_empty():
+		lines.append("[color=%s]%s[/color]: %s  [color=#8a93a6]Counter: %s[/color]" % [grp.color.to_html(false), grp.name, grp.ability, grp.counter])
+	var state: PackedStringArray = []
+	if e.special != "":
+		state.append("[color=#ffb86b]%s[/color]" % e.special.capitalize())
+	if e.airborne or e.arch == "balloon":
+		state.append("in the air")
+	if e.immune:
+		state.append("phased out")
+	if e.burrowed:
+		state.append("underground")
+	if e.stun_t > 0.0:
+		state.append("stunned")
+	if not e.dots.is_empty():
+		state.append("burning")
+	if e.route != null and e.route.length > 0.0:
+		state.append("%d%% of the way to the core" % roundi(clampf(e.d / e.route.length, 0.0, 1.0) * 100.0))
+	if not state.is_empty():
+		lines.append(", ".join(state))
+	enemy_text.text = "\n".join(lines)
+	enemy_panel.visible = true
+	enemy_panel.reset_size()
+	enemy_panel.position = Vector2((get_viewport_rect().size.x - enemy_panel.size.x) / 2.0, 70)
+	toasts.offset_top = 84 + enemy_panel.size.y + 8
+
+
+static func _num(v: float) -> String:
+	if v >= 10000.0:
+		return "%.1fk" % (v / 1000.0)
+	return str(ceili(v))
 
 
 # ----------------------------------------------------------------- tower card

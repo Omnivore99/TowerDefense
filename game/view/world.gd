@@ -57,6 +57,12 @@ var selected: Dictionary = {}
 var rot := 0
 var mirror := false
 var hover := Vector2i(-999, -999)
+var hover_enemy := 0
+var hover_tower := 0
+var hover_rest := 0.0
+var hover_rest_pos := Vector2.ZERO
+var demo_hurt := false  ## demo only: --hurt holds every monster at 40% HP (health bar check)
+var demo_hover := ""  ## demo only: --hover enemy|tower points the cursor at one
 var ghost: Node3D
 var ghost_sig := ""
 var range_ring: MeshInstance3D
@@ -239,6 +245,8 @@ func _start_demo(args: PackedStringArray) -> void:
 			cam_rig.yaw = cam_rig.yaw_goal
 	else:
 		cam_rig.recentre()
+	demo_hover = _arg(args, "--hover", "")
+	demo_hurt = args.has("--hurt")
 	shot_path = _arg(args, "--shot", "")
 	shot_wait = float(_arg(args, "--wait", "2.0"))
 
@@ -545,7 +553,13 @@ func _process(delta: float) -> void:
 		cam_rig.pan_keys(wasd if wasd != Vector2.ZERO else pan, delta)
 	if cam_rig.spectator:
 		cam_rig.spec_focus = _densest_fight()
+	if demo_hurt:
+		for e in g.enemies:
+			e.hp = minf(e.hp, e.max_hp * 0.4)
+	if demo_hover != "":
+		_demo_aim_mouse()
 	_update_ghost()
+	_update_hover_info()
 	hud.refresh(g)
 	_update_selected_card()
 	if shot_path != "":
@@ -2025,15 +2039,146 @@ func _update_selected_card() -> void:
 			hud.show_tower(t, g)
 
 
+## Hover pop-ups: monster stats at the top of the screen, tower stats beside the cursor.
+func _update_hover_info() -> void:
+	var busy := not playing or hud.has_modal() or pan_drag or kit_slot >= 0 or unit_slot >= 0 or strike_mode != ""
+	var holding := _cur_piece() != null
+	var vp := get_viewport().get_visible_rect()
+	if busy or not vp.has_point(mouse_pos) or _over_hud(mouse_pos):
+		hud.show_enemy(null, g)
+		hud.show_hover_tower(null, mouse_pos)
+		return
+	# nearest monster under the cursor (screen space, generous radius)
+	var best: SimEnemy = null
+	var best_d := 1e9
+	for e in g.enemies:
+		if not e.alive:
+			continue
+		var ev: EnemyView = enemy_views.get(e.id)
+		if ev == null:
+			continue
+		var wp := ev.global_position + Vector3(0, ev.r, 0)
+		if cam_rig.cam.is_position_behind(wp):
+			continue
+		var sp := cam_rig.cam.unproject_position(wp)
+		var edge := cam_rig.cam.unproject_position(wp + cam_rig.cam.global_basis.x * ev.r * 1.3)
+		var rad := maxf(14.0, sp.distance_to(edge))
+		var dd := sp.distance_to(mouse_pos)
+		if dd < rad and dd < best_d:
+			best_d = dd
+			best = e
+	if best != null:
+		hover_enemy = best.id
+	elif hover_enemy != 0:
+		var he := g._enemy_by_id(hover_enemy)
+		if he == null or not he.alive:
+			hover_enemy = 0
+	hud.show_enemy(best, g)
+	var tw: SimTower = null
+	if best == null:
+		tw = _tower_under(mouse_pos)
+	# with a piece in hand the cursor is usually just passing over: wait for it to rest
+	var tid2 := tw.id if tw != null else 0
+	if tid2 != hover_tower or mouse_pos.distance_to(hover_rest_pos) > 6.0:
+		hover_tower = tid2
+		hover_rest_pos = mouse_pos
+		hover_rest = 0.0
+	hover_rest += get_process_delta_time()
+	if holding and hover_rest < 0.45:
+		tw = null
+	hud.show_hover_tower(tw, mouse_pos)
+
+
+func _demo_aim_mouse() -> void:
+	var wp: Variant = null
+	if demo_hover == "enemy":
+		var bestv := -1.0
+		for e in g.enemies:
+			var ev: EnemyView = enemy_views.get(e.id)
+			if e.alive and ev != null and e.max_hp > bestv and not cam_rig.cam.is_position_behind(ev.global_position):
+				var sp0 := cam_rig.cam.unproject_position(ev.global_position)
+				if get_viewport().get_visible_rect().grow(-200).has_point(sp0):
+					bestv = e.max_hp
+					wp = ev.global_position + Vector3(0, ev.r, 0)
+	else:
+		var mid := get_viewport().get_visible_rect().get_center()
+		var bd := 1e9
+		for t in g.towers:
+			if t.type != "" and not t.base_tower:
+				var tv0: TowerView = tower_views.get(t.id)
+				if tv0 == null:
+					continue
+				var tp := tv0.global_position + Vector3(t.cx, tv0.top_y * 0.7, t.cy)
+				var dd := cam_rig.cam.unproject_position(tp).distance_to(mid + Vector2(200, 0))
+				if dd < bd:
+					bd = dd
+					wp = tp
+	if wp != null:
+		mouse_pos = cam_rig.cam.unproject_position(wp)
+		hover = _cell_under(mouse_pos)
+
+
+## The tower whose column (base to head) is nearest the cursor on screen, or the one on the hovered cell.
+func _tower_under(p: Vector2) -> SimTower:
+	var best: SimTower = null
+	var best_d := 26.0
+	for id in tower_views:
+		var tv: TowerView = tower_views[id]
+		var t: SimTower = tv.tower
+		if t == null or t.type == "" or t.base_tower:
+			continue
+		var base := tv.global_position + Vector3(t.cx, tv.top_y * 0.3, t.cy)
+		var top := tv.global_position + Vector3(t.cx, tv.top_y + 0.4, t.cy)
+		if cam_rig.cam.is_position_behind(base):
+			continue
+		var a := cam_rig.cam.unproject_position(base)
+		var b := cam_rig.cam.unproject_position(top)
+		var d := p.distance_to(Geometry2D.get_closest_point_to_segment(p, a, b))
+		if d < best_d:
+			best_d = d
+			best = t
+	if best == null and Board.in_grid(hover.x, hover.y):
+		var tid: int = g.tower_at[Board.cell_idx(hover.x, hover.y)]
+		if tid != 0:
+			best = g.tower_by_id(tid)
+			if best != null and best.base_tower:
+				best = null
+	return best
+
+
+func _over_hud(p: Vector2) -> bool:
+	var c := get_viewport().gui_get_hovered_control()
+	return c != null and c.mouse_filter == Control.MOUSE_FILTER_STOP and c.is_visible_in_tree()
+
+
 # ------------------------------------------------------------------ input
+## Middle-drag pans everywhere, even with the cursor over a HUD panel (only modals block it).
+## Motion is handled here so a drag keeps panning when it crosses the HUD.
+func _input(ev: InputEvent) -> void:
+	if g == null:
+		return
+	if ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_MIDDLE:
+		if ev.pressed and not hud.has_modal():
+			pan_drag = true
+			pan_moved = 0.0
+			cam_rig.spectator = false
+		elif not ev.pressed:
+			pan_drag = false
+		get_viewport().set_input_as_handled()
+		return
+	if ev is InputEventMouseMotion:
+		mouse_pos = ev.position
+		if pan_drag and ev.button_mask & (MOUSE_BUTTON_MASK_MIDDLE | MOUSE_BUTTON_MASK_RIGHT) == 0:
+			pan_drag = false  # the release landed on a HUD control
+		if pan_drag:
+			cam_rig.pan(ev.relative)
+			pan_moved += ev.relative.length()
+
+
 func _unhandled_input(ev: InputEvent) -> void:
 	if g == null:
 		return
 	if ev is InputEventMouseMotion:
-		mouse_pos = ev.position
-		if pan_drag:
-			cam_rig.pan(ev.relative)
-			pan_moved += ev.relative.length()
 		return
 	if ev is InputEventMouseButton and cam_rig.spectator and ev.pressed:
 		cam_rig.spectator = false
@@ -2046,13 +2191,13 @@ func _unhandled_input(ev: InputEvent) -> void:
 			MOUSE_BUTTON_WHEEL_DOWN:
 				if ev.pressed:
 					cam_rig.zoom_at(1.0 / 0.88, ev.position)
-			MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE:
+			MOUSE_BUTTON_RIGHT:
 				if ev.pressed:
 					pan_drag = true
 					pan_moved = 0.0
 				else:
 					pan_drag = false
-					if pan_moved < 6.0 and ev.button_index == MOUSE_BUTTON_RIGHT:
+					if pan_moved < 6.0:
 						_cancel()
 			MOUSE_BUTTON_LEFT:
 				if ev.pressed and playing and not hud.has_modal():

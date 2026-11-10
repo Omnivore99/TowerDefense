@@ -22,6 +22,8 @@ var yaw := 0.0
 var t := 0.0
 var hp_back: MeshInstance3D
 var hp_fill: MeshInstance3D
+var fill_q: QuadMesh  ## own mesh: billboards spin around the centre, so the fill is shrunk and offset in mesh space
+var fill_frac := -1.0
 var shield_mesh: MeshInstance3D
 var dent := 0.0
 var built_suit := ""
@@ -147,12 +149,14 @@ func _build() -> void:
 	# health bar (billboard)
 	hp_back = MeshInstance3D.new()
 	var q := QuadMesh.new()
-	q.size = Vector2(1, 0.12)
+	q.size = Vector2(1, 0.17)
 	hp_back.mesh = q
 	hp_back.material_override = _bar_mat(Color(0, 0, 0, 0.6))
 	add_child(hp_back)
 	hp_fill = MeshInstance3D.new()
-	hp_fill.mesh = q
+	fill_q = QuadMesh.new()
+	fill_q.size = Vector2(1, 0.13)
+	hp_fill.mesh = fill_q
 	hp_fill.material_override = _bar_mat(Color(0.5, 1.0, 0.55, 0.95))
 	add_child(hp_fill)
 	hp_back.visible = false
@@ -170,6 +174,7 @@ static func _bar_mat(c: Color) -> StandardMaterial3D:
 	m.albedo_color = c
 	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	m.billboard_keep_scale = true
 	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	m.no_depth_test = true
 	m.render_priority = 10
@@ -290,7 +295,13 @@ func sync(alpha: float, delta: float) -> void:
 		hp_back.position = Vector3(0, top, 0)
 		hp_back.scale = Vector3(w2, 1, 1)
 		hp_fill.position = Vector3(0, top, 0)
-		hp_fill.scale = Vector3(w2 * frac2, 0.8, 1)
+		if absf(frac2 - fill_frac) > 0.002:
+			fill_frac = frac2
+			fill_q.size = Vector2(maxf(0.001, frac2), 0.13)
+			fill_q.center_offset = Vector3(-(1.0 - frac2) * 0.5, 0, 0)
+			var col := Color(0.5, 1.0, 0.55, 0.95) if frac2 > 0.5 else (Color(1.0, 0.85, 0.3, 0.95) if frac2 > 0.25 else Color(1.0, 0.35, 0.3, 0.95))
+			hp_fill.material_override = _bar_mat(col)
+		hp_fill.scale = Vector3(w2, 1, 1)
 	if shield_mesh != null:
 		shield_mesh.visible = e.shield > 0.0
 		shield_mesh.position.y = r + lift
