@@ -412,3 +412,29 @@ func explosion(pos: Vector3, r: float, c: Color) -> void:
 	burst(pos, 8, 5.0, Color(0.3, 0.28, 0.27), 0.12, 1.2, "debris", 14.0)
 	ring(pos + Vector3(0, 0.1, 0), 0.2, r * 1.3, 0.38, Color(c.r, c.g, c.b, 0.7))
 	decal(pos, r * 0.75, Color(0.04, 0.035, 0.035, 0.7), 8.0)
+
+
+## Artillery impact (section 10.6): flash, rising stem, a rolling cap that billows out over
+## 2.6 s, a ground shockwave and a burnt crater.
+func mushroom(pos: Vector3, r: float) -> void:
+	emit("spark", pos + Vector3(0, 0.6, 0), Vector3.ZERO, 0.25, r * 1.3, Color(1.0, 0.95, 0.8, 1.0), 0.0, 0.0, 1.2)
+	burst(pos + Vector3(0, 0.3, 0), 30, 8.0, Color(1.0, 0.55, 0.2), 0.12, 0.6)
+	for i in 14:
+		var j := Vector3(randf_range(-0.25, 0.25), 0.2, randf_range(-0.25, 0.25))
+		emit("puff", pos + j, Vector3(0, 2.2 + i * 0.22, 0), 2.6, 0.32 + 0.025 * i, Color(0.42, 0.36, 0.32, 0.75), 0.0, 1.1, 0.5)
+	for i in 22:
+		var a := i * TAU / 22.0
+		emit("puff", pos + Vector3(0, 1.2, 0), Vector3(cos(a) * 1.7, 4.4, sin(a) * 1.7), 2.6, 0.55, Color(0.52, 0.4, 0.32, 0.8), 0.0, 1.3, 0.9)
+		emit("spark", pos + Vector3(0, 1.0, 0), Vector3(cos(a) * 1.2, 3.8, sin(a) * 1.2), 0.9, 0.3, Color(1.0, 0.5, 0.15, 0.8), 0.0, 1.3, 0.6)
+	ring(pos + Vector3(0, 0.1, 0), 0.3, r * 2.6, 0.7, Color(1.0, 0.85, 0.6, 0.7))
+	burst(pos, 12, 6.0, Color(0.3, 0.28, 0.27), 0.14, 1.4, "debris", 14.0)
+	decal(pos, r * 0.9, Color(0.03, 0.025, 0.02, 0.85), 30.0)
+
+
+## The orbital beam (section 10.8): white core, blue fringe, 1 s.
+func beam(pos: Vector3, life: float = 1.0) -> void:
+	var top := pos + Vector3(0, 70, 0)
+	ribbon(top, pos, 2.6, Color(0.35, 0.6, 1.0, 0.8), life)
+	ribbon(top, pos, 1.1, Color(1.0, 1.0, 1.0, 1.0), life * 0.9)
+	burst(pos + Vector3(0, 0.3, 0), 40, 9.0, Color(0.75, 0.88, 1.0), 0.1, 0.8)
+	ring(pos + Vector3(0, 0.1, 0), 0.5, 4.0, 0.5, Color(0.8, 0.9, 1.0, 0.9))

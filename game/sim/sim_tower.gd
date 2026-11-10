@@ -28,6 +28,20 @@ var corroded := false
 ## Cached hot-path values (set by Game._rebuild_tower).
 var air := false
 var reach := 0.0
+## v2 targeting (section 9.1): priority id, whether the player chose it, retarget timer.
+var priority := ""
+var priority_set := false
+var retarget_t := 0.0
+var aligned := false
+## v2 evolutions (section 9.5): mark 1..4, branch -1 (none) / 0 / 1, branch mods, tech id.
+var mark := 1
+var branch := -1
+var mods: Dictionary = {}
+var tech := ""
+## Damage multiplier from nearby support (Crystal Ward, Lighthouse Grid), refreshed by Game.
+var aura_mult := 1.0
+var evo_t := 99.0
+var fire_drop_t := 0.0
 
 
 func ground_count() -> int:
@@ -65,4 +79,10 @@ func copy() -> SimTower:
 	t.shots = shots
 	t.kills = kills
 	t.base_tower = base_tower
+	t.priority = priority
+	t.priority_set = priority_set
+	t.mark = mark
+	t.branch = branch
+	t.mods = mods.duplicate(true)
+	t.tech = tech
 	return t

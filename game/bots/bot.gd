@@ -8,7 +8,7 @@ const SKILLS := {
 	"expert": {"waste": 0.0, "colour": 0.7, "stack": 0.3, "spot": "spiral", "maxMass": 8, "holes": false},
 }
 const WEAK := {"hearts": "green", "clubs": "red", "diamonds": "blue", "spades": "gold"}
-const BUILD_PRIORITY: Array[String] = ["lance", "blastDoor", "beacon", "powerStation", "harvesterHub", "missileBattery", "research", "recycler", "factory", "smite", "shapeFactory"]
+const BUILD_PRIORITY: Array[String] = ["lance", "armory", "blastDoor", "beacon", "powerStation", "harvesterHub", "missileBattery", "research", "recycler", "factory", "shapeFactory"]
 
 var game: Game
 var skill: String
@@ -50,9 +50,9 @@ func act() -> void:
 	if cooldown > 0:
 		return
 	cooldown = 30 if skill == "novice" else 12
-	if g.can_smite():
-		_smite()
+	_strike()
 	_pop()
+	_arsenal()
 	var src := _next_source()
 	if not src.is_empty():
 		_place_one(src)
@@ -148,6 +148,8 @@ func _place_one(src: Dictionary) -> void:
 	var cfg: Dictionary = SKILLS[skill]
 	if rng.chance(cfg.waste):
 		g.discard(src)
+		return
+	if skill != "novice" and (Pieces.is_cap(piece.kind) or rng.chance(0.5)) and _harvest_wanted(src, piece):
 		return
 	var towers: Array[SimTower] = []
 	for t in g.towers:
@@ -252,6 +254,53 @@ func _harvest(src: Dictionary, piece: Dictionary) -> bool:
 	return false
 
 
+## Keep a target number of mines, lumber camps and pumps (v2 economy): returns true if placed.
+func _harvest_wanted(src: Dictionary, piece: Dictionary) -> bool:
+	var g := game
+	var have := {"ore": 0, "forest": 0, "lake": 0}
+	for h in g.harvesters:
+		have[h.get("node", "ore")] += 1
+	var b := g.board_no
+	var want := {"ore": 2 + b / 2, "forest": 1 + b / 2, "lake": (b + 1) / 3}
+	var node := ""
+	for k in ["forest", "ore", "lake"]:
+		if have[k] < want[k]:
+			node = k
+			break
+	if node == "":
+		return false
+	var cand: Array[Vector2i] = []
+	match node:
+		"ore":
+			cand.assign(g.board.veins)
+		"forest":
+			for f in g.eco.forests:
+				for c in f.cells:
+					if g.eco.tree[c] == 1:
+						cand.append(Vector2i(c % Bal.GRID_W, c / Bal.GRID_W))
+		"lake":
+			for l in g.eco.lakes:
+				if l.units <= 0.0:
+					continue
+				for c in l.cells:
+					var v := Vector2i(c % Bal.GRID_W, c / Bal.GRID_W)
+					for d in Game.DIRS4:
+						var n: Vector2i = v + d
+						if Board.in_grid(n.x, n.y) and g.eco.water[Board.cell_idx(n.x, n.y)] == 0:
+							cand.append(n)
+	if cand.is_empty():
+		return false
+	# nearest to the core first (safer, shorter view distance), a few tries
+	cand.sort_custom(func(a, z): return Vector2(a).distance_squared_to(Board.CORE_PT) < Vector2(z).distance_squared_to(Board.CORE_PT))
+	for tc in cand.slice(0, 24):
+		for o in orients:
+			var pv := g.preview(piece, o.rot, o.mirror, tc.x, tc.y)
+			if pv.ok and pv.kind == "harvester" and pv.get("node", "") == node:
+				if g.place(src, o.rot, o.mirror, tc.x, tc.y).ok:
+					return true
+	return false
+
+
 ## Best legal placement of a piece onto/next to a tower.
 func _best_on(t: SimTower, piece: Dictionary, kind: String) -> Dictionary:
 	var g := game
@@ -320,23 +369,97 @@ func _commit(src: Dictionary, pv: Dictionary) -> bool:
 	return game.place(src, pv.o.rot, pv.o.mirror, pv.cx, pv.cy).ok
 
 
-func _smite() -> void:
+## Orbital and air strikes on the densest pack.
+func _strike() -> void:
 	var g := game
+	var orb := g.can_orbital()
+	var air := g.can_airstrike()
+	if not orb and not air:
+		return
 	var best := {}
 	for e in g.enemies:
 		var n := 0
 		for o in g.enemies:
-			if Vector2(o.x - e.x, o.y - e.y).length() < 6.0:
+			if Vector2(o.x - e.x, o.y - e.y).length() < 5.0:
 				n += 1
 		if best.is_empty() or n > best.n:
-			best = {"x": e.x, "y": e.y, "n": n}
-	if not best.is_empty() and best.n >= 5:
-		g.smite(best.x, best.y)
+			best = {"x": e.x, "y": e.y, "n": n, "dir": e.dir}
+	if best.is_empty() or best.n < (4 if skill == "expert" else 6):
+		return
+	if orb:
+		g.orbital(best.x, best.y)
+	elif air:
+		g.airstrike(best.x, best.y, best.dir)
+
+
+## Technology, evolutions and kits (average and expert only).
+func _arsenal() -> void:
+	var g := game
+	if skill == "novice":
+		return
+	if g.base.freeTech:
+		g.open_tech(_wanted_tech())
+	var reserve := 0.0 if skill == "expert" else 8.0
+	# evolve the strongest towers first
+	var ts: Array = g.towers.filter(func(t): return t.type != "" and t.mark < 4)
+	ts.sort_custom(func(a, b): return a.stats.dps * a.ground_count() > b.stats.dps * b.ground_count())
+	for t in ts.slice(0, 4):
+		var br: int = t.branch
+		if t.mark == 2:
+			br = _branch_for(t)
+			if br < 0:
+				continue
+		if g.evolve_blocked(t.id, br) == "" and g.base.ore >= reserve:
+			g.evolve(t.id, br)
+			return
+	# open a second technology when rich
+	if skill == "expert" and g.base.essence > 40.0:
+		for k in Bal.TECHS:
+			if g.tech_level(k) == 0:
+				g.open_tech(k)
+				break
+	# kits: howitzers on the ring, landmines near the core
+	for id in ["orbital", "airstrike", "howitzer"]:
+		if g.arsenal.kit_blocked(g, id) == "":
+			g.buy_kit(id)
+			return
+	if g.base.ore > 8.0 and g.arsenal.traps.size() < 2 * g.board_no and g.arsenal.belt.find("") >= 0 and g.arsenal.kit_blocked(g, "landmine") == "":
+		g.buy_kit("landmine")
+	var slot: int = g.arsenal.belt.find("landmine")
+	if slot >= 0 and not g.board.routes.is_empty():
+		var r: Route = rng.pick(g.board.routes)
+		var p := r.at(r.length * rng.range_f(0.55, 0.85))
+		g.place_kit(slot, 0, floori(p.x), floori(p.y))
+
+
+func _branch_for(t: SimTower) -> int:
+	var bs := Evolve.branches(t.type)
+	var best := -1
+	var best_lv := 0
+	for i in bs.size():
+		var lv := game.tech_level(bs[i].tech)
+		if lv > best_lv:
+			best_lv = lv
+			best = i
+	return best
+
+
+## The technology most of the current towers can branch into.
+func _wanted_tech() -> String:
+	var votes := {"steam": 0.0, "aether": 0.0, "alchemy": 0.0}
+	for t in game.towers:
+		for b in Evolve.branches(t.type):
+			votes[b.tech] += t.stats.get("dps", 1.0)
+	var best := "steam"
+	for k in votes:
+		if votes[k] > votes[best]:
+			best = k
+	return best
 
 
 func _shop() -> void:
 	var g := game
-	g.convert_ore()
+	g.convert_ore(0.0 if skill == "novice" else 21.0)
 	while true:
 		var bought := false
 		for id in BUILD_PRIORITY:

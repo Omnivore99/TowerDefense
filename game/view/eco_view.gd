@@ -161,6 +161,8 @@ func _rebuild_static() -> void:
 	_fill(stumps_mm, stumps)
 	var cr: Array[Transform3D] = []
 	for c in eco.craters:
+		if c.get("scorch", false):
+			continue
 		cr.append(Transform3D(Basis().scaled(Vector3(1, 0.25, 1)), _cell_xyz(c.cell, 0.02)))
 	_fill(craters_mm, cr)
 	# lakes

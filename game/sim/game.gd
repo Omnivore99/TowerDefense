@@ -78,6 +78,9 @@ var combat: Rng
 var wave_rng: Rng
 var _tower_index := {}
 var eco: Economy
+var arsenal: Arsenal
+var metronome_assist := false
+var _aura_t := 0.0
 
 
 func _init(seed_value: int, mode_id: String = "normal", opts: Dictionary = {}) -> void:
@@ -85,6 +88,7 @@ func _init(seed_value: int, mode_id: String = "normal", opts: Dictionary = {}) -
 	mode = mode_id
 	base = new_base()
 	eco = Economy.new(self)
+	arsenal = Arsenal.new()
 	tutorial_enabled = opts.get("tutorial", true)
 	tower_at.resize(Bal.GRID_W * Bal.GRID_H)
 	obj_at.resize(Bal.GRID_W * Bal.GRID_H)
@@ -102,7 +106,8 @@ static func new_base() -> Dictionary:
 	var b := []
 	for _s in Bal.BASE_SQUARES:
 		b.append("")
-	return {"unlocked": Bal.BASE_START_SQUARES, "buildings": b, "essence": 0.0, "ore": 0.0, "timber": 0.0, "water": 0.0, "pearls": 0, "lanceLevel": 0, "lanceCharges": 0, "smiteCharge": 99}
+	return {"unlocked": Bal.BASE_START_SQUARES, "buildings": b, "essence": 0.0, "ore": 0.0, "timber": 0.0, "water": 0.0, "pearls": 0, "lanceLevel": 0, "lanceCharges": 0,
+		"tech": {"steam": 0, "aether": 0, "alchemy": 0}, "freeTech": false, "freeTechGiven": false, "researchTech": ""}
 
 
 func has_building(id: String) -> bool:
@@ -148,7 +153,8 @@ func snapshot() -> Dictionary:
 	var ts: Array = []
 	for t in towers:
 		if not t.base_tower:
-			ts.append({"id": t.id, "pieces": t.pieces.duplicate(true), "height": t.height, "kills": t.kills})
+			ts.append({"id": t.id, "pieces": t.pieces.duplicate(true), "height": t.height, "kills": t.kills,
+				"mark": t.mark, "branch": t.branch, "priority": t.priority, "prioritySet": t.priority_set})
 	var rps: Array = []
 	for r in road_pieces:
 		rps.append({"id": r.id, "kind": r.kind, "piece": r.piece.duplicate(), "cells": r.cells.duplicate(), "macro": r.macro, "mines": r.mines.duplicate()})
@@ -164,6 +170,7 @@ func snapshot() -> Dictionary:
 		"hold": hold.duplicate() if hold != null else null,
 		"nextId": next_id,
 		"eco": eco.serialize(),
+		"arsenal": arsenal.serialize(),
 	}
 
 
@@ -185,6 +192,10 @@ func restore(snap: Dictionary) -> void:
 		var t := _blank_tower(o.id, o.height)
 		t.pieces = o.pieces
 		t.kills = o.kills
+		t.mark = int(o.get("mark", 1))
+		t.branch = int(o.get("branch", -1))
+		t.priority = o.get("priority", "")
+		t.priority_set = o.get("prioritySet", false)
 		_rebuild_tower(t)
 		if t.type != "":
 			t.active = true
@@ -202,6 +213,11 @@ func restore(snap: Dictionary) -> void:
 		road_pieces.append(rp)
 		for c in rp.cells:
 			obj_at[Board.cell_idx(c.x, c.y)] = rp.id
+	arsenal = Arsenal.new()
+	arsenal.load_data(s.get("arsenal", {}))
+	for k in ["tech", "freeTech", "freeTechGiven", "researchTech"]:
+		if not base.has(k):
+			base[k] = new_base()[k]
 	harvesters = s.harvesters
 	for h in harvesters:
 		for c in h.cells:
@@ -265,7 +281,7 @@ func start_board(b: int) -> void:
 		board_made = true
 		eco.attach(board)
 	else:
-		var plan := board.plan_road(b, func(c: int) -> bool: return obj_at[c] != 0 or tower_at[c] != 0)
+		var plan := board.plan_road(b, func(c: int) -> bool: return obj_at[c] != 0 or tower_at[c] != 0 or arsenal.off_at.has(c))
 		board.set_pending(plan.path)
 		strike_destroys = plan.destroys
 	enemies.clear()
@@ -293,6 +309,8 @@ func start_board(b: int) -> void:
 		"maxBacklog": 0, "backlogOver2": 0.0, "combosPeak": 0, "kills": 0, "leaks": 0, "earlyCalls": 0, "piecesPlaced": 0,
 	}
 	battery_tower = _make_battery() if has_building("missileBattery") else null
+	if b >= 2 and not base.freeTechGiven:
+		base.freeTech = true
 	tutorial = {}
 	_set_phase("reveal")
 	events.append({"t": "strike", "path": board.pending, "destroys": strike_destroys.size()})
@@ -418,7 +436,7 @@ func _end_wave() -> void:
 	var gained := eco.end_wave(Rng.new(Rng.sub_seed(seed, [515, board_no, wave_index, attempt])))
 	if gained.ore + gained.timber + gained.water > 0.0:
 		events.append({"t": "harvest", "ore": gained.ore, "timber": gained.timber, "water": gained.water})
-	base.smiteCharge += 1
+	arsenal.wave_end()
 	projectiles.clear()
 	puddles.clear()
 	tanks.clear()
@@ -438,7 +456,13 @@ func _finish_metrics() -> void:
 	metrics.baseLost = maxf(0.0, Bal.BASE_INTEGRITY - integrity) / Bal.BASE_INTEGRITY
 	metrics.combosPeak = combo.peak
 	var tot := eco.pimple_income + eco.other_income
-	metrics["extra"] = {"pimpleShare": eco.pimple_income / tot if tot > 0.0 else 0.0, "timber": base.timber, "water": base.water, "pearls": base.pearls}
+	var marks := [0, 0, 0, 0]
+	for t in towers:
+		if t.type != "":
+			marks[t.mark - 1] += 1
+	metrics["extra"] = {"pimpleShare": eco.pimple_income / tot if tot > 0.0 else 0.0, "timber": base.timber, "water": base.water, "pearls": base.pearls,
+		"mk2": marks[1], "mk3": marks[2], "mk4": marks[3], "techMax": tech_level(best_tech()), "kits": arsenal.traps.size() + arsenal.metronomes.size() + arsenal.rams.size(),
+		"pads": 6 - arsenal.pads.count({})}
 	all_metrics.append(metrics.duplicate())
 
 
@@ -455,6 +479,10 @@ func next_board() -> void:
 		return
 	attempt = 1
 	eco.refill_lakes()
+	arsenal.next_board()
+	if has_building("research"):
+		var rt: String = base.researchTech if base.researchTech != "" else best_tech()
+		base.tech[rt] = int(base.tech[rt]) + 1
 	board_no += 1
 	board_snapshot = snapshot()
 	start_board(board_no)
@@ -480,8 +508,8 @@ func build(square: int, id: String) -> String:
 	return ""
 
 
-func convert_ore() -> void:
-	var n := floorf(base.ore / Bal.ORE_TO_ESSENCE)
+func convert_ore(keep: float = 0.0) -> void:
+	var n := floorf(maxf(0.0, base.ore - keep) / Bal.ORE_TO_ESSENCE)
 	base.essence += n
 	base.ore -= n * Bal.ORE_TO_ESSENCE
 
@@ -607,22 +635,130 @@ func choose_family(f: String) -> bool:
 	return true
 
 
-func can_smite() -> bool:
-	return has_building("smite") and base.smiteCharge >= Bal.BUILDING_FX.smiteWaves and phase == "wave"
+# ================================================================ technology & evolutions
+func tech_level(tech: String) -> int:
+	return Evolve.level_of(base, tech)
 
 
-func smite(x: float, y: float) -> bool:
-	if not can_smite() or wave.is_empty():
-		return false
-	var mult := building_mult("smite")
-	var r: float = Bal.BUILDING_FX.smiteRadius * (1.236 if mult > 1.0 else 1.0)
-	var dmg: float = Bal.BUILDING_FX.smiteUnits * wave.unitHp * mult
-	for e in enemies:
-		if e.alive and Vector2(e.x - x, e.y - y).length() <= r:
-			damage(e, dmg, null, {"area": true, "ignoreShield": true})
-	base.smiteCharge = 0
-	events.append({"t": "smite", "x": x, "y": y, "r": r})
-	return true
+func best_tech() -> String:
+	var best := "steam"
+	for k in Bal.TECHS:
+		if int(base.tech[k]) > int(base.tech[best]):
+			best = k
+	return best
+
+
+func tech_open_cost(tech: String) -> float:
+	if tech_level(tech) >= 1:
+		return -1.0
+	return 0.0 if base.freeTech else Bal.TECH_OPEN_COST
+
+
+## Open a technology at level 1 (free once from board 2, then 13 Essence each).
+func open_tech(tech: String) -> String:
+	var c := tech_open_cost(tech)
+	if c < 0.0:
+		return "Already open"
+	if base.essence < c:
+		return "Not enough Essence"
+	base.essence -= c
+	if base.freeTech:
+		base.freeTech = false
+		base.freeTechGiven = true
+	base.tech[tech] = maxi(1, int(base.tech[tech]))
+	events.append({"t": "techUp", "tech": tech, "level": tech_level(tech)})
+	_rebuild_all()
+	return ""
+
+
+func _add_tech(tech: String, n: int) -> void:
+	var before := tech_level(tech)
+	base.tech[tech] = int(base.tech[tech]) + n
+	var after := tech_level(tech)
+	if after > before:
+		events.append({"t": "techUp", "tech": tech, "level": after})
+		_rebuild_all()
+
+
+func _rebuild_all() -> void:
+	for t in towers:
+		_rebuild_tower(t)
+
+
+func evolve_blocked(tower_id: int, branch: int = -1) -> String:
+	var t := tower_by_id(tower_id)
+	if t == null:
+		return "No tower"
+	return Evolve.blocked(base, t, branch)
+
+
+## Evolve a tower to its next mark. branch (0/1) is needed for Mk III. Returns "" or a reason.
+func evolve(tower_id: int, branch: int = -1) -> String:
+	var t := tower_by_id(tower_id)
+	if t == null:
+		return "No tower"
+	var err := Evolve.blocked(base, t, branch)
+	if err != "":
+		events.append({"t": "reject", "reason": err, "cells": t.layers[0]})
+		return err
+	Evolve.pay(base, Evolve.cost(t, branch))
+	if t.mark == 2:
+		t.branch = branch
+	t.mark += 1
+	t.evo_t = 0.0
+	_rebuild_tower(t)
+	if t.mark == 3:
+		_add_tech(t.tech, 1)
+	elif t.mark == 4:
+		_add_tech(t.tech, 2)
+	events.append({"t": "evolve", "towerId": t.id, "mark": t.mark, "tech": t.tech, "x": t.cx, "y": t.cy})
+	return ""
+
+
+func set_priority(tower_id: int, pr: String, all_of_type: bool = false) -> void:
+	var t := tower_by_id(tower_id)
+	if t == null:
+		return
+	for o in towers:
+		if o == t or (all_of_type and o.type == t.type):
+			o.priority = pr
+			o.priority_set = true
+
+
+func cycle_priority(tower_id: int) -> String:
+	var t := tower_by_id(tower_id)
+	if t == null:
+		return ""
+	var i := Bal.PRIORITIES.find(t.priority)
+	set_priority(tower_id, Bal.PRIORITIES[(i + 1) % Bal.PRIORITIES.size()])
+	return t.priority
+
+
+# ================================================================ kits
+func buy_kit(id: String) -> String:
+	return arsenal.buy(self, id)
+
+
+func place_kit(slot: int, rot: int, cx: int, cy: int) -> Dictionary:
+	if not can_place_pieces():
+		return {"ok": false, "reason": "Not now"}
+	return arsenal.place(self, slot, rot, cx, cy)
+
+
+func can_orbital() -> bool:
+	return arsenal.can_orbital(self)
+
+
+func orbital(x: float, y: float) -> bool:
+	return arsenal.orbital(self, x, y)
+
+
+func can_airstrike() -> bool:
+	return arsenal.can_airstrike(self)
+
+
+func airstrike(x: float, y: float, dir: float) -> bool:
+	return arsenal.airstrike(self, x, y, dir)
 
 
 # ================================================================ placement
@@ -714,6 +850,8 @@ func _preview_harvest(_piece: Dictionary, cells: Array) -> Dictionary:
 
 
 func blocked_reason(i: int) -> String:
+	if arsenal != null and (arsenal.off_at.has(i) or arsenal.trap_at.has(i)):
+		return "A kit is there"
 	return eco.blocked_reason(i)
 
 
@@ -821,6 +959,12 @@ func _rebuild_tower(t: SimTower) -> void:
 	t.cx = sx / g.size()
 	t.cy = sy / g.size()
 	t.stats = Towers.compute_stats(t, stat_ctx())
+	if t.type == "":
+		t.mark = 1
+		t.branch = -1
+	Evolve.apply(t, base)
+	if t.type != "" and not t.priority_set:
+		t.priority = Bal.PRIORITY_DEFAULT.get(t.type, "first")
 	t.air = Bal.TOWERS[t.type].air if t.type != "" else false
 	t.reach = t.stats.get("range", 0.0)
 
@@ -1050,7 +1194,9 @@ func step() -> void:
 	for t in towers:
 		if t.active:
 			t.activate_t += dt
+			t.evo_t += dt
 	if phase == "calm":
+		arsenal.step(self, dt)
 		return
 	wave_t += dt
 	metrics.waveTime += dt
@@ -1088,6 +1234,7 @@ func step() -> void:
 	_step_puddles(dt)
 	_step_tanks(dt)
 	_step_mines()
+	arsenal.step(self, dt)
 	var alive_e: Array[SimEnemy] = []
 	var danger := false
 	for e in enemies:
@@ -1260,13 +1407,19 @@ func _step_enemies(dt: float) -> void:
 			e.gait = fmod(e.anim_t, 1.0)
 		if e.arch == "tumbler" and fmod(e.anim_t, TUMBLER_FLIP) < dt:
 			e.suit = Waves.SUITS[(Waves.SUITS.find(e.suit) + 1) % 4]
+		if e.vuln_t > 0.0:
+			e.vuln_t -= dt
+		if e.unmade_t > 0.0:
+			e.unmade_t -= dt
+		var unmade := e.unmade_t > 0.0
 		match e.ability:
 			"lanthanide":
-				e.hp = minf(e.max_hp, e.hp + e.max_hp * Bal.ABILITIES.regen * dt)
+				if not unmade:
+					e.hp = minf(e.max_hp, e.hp + e.max_hp * Bal.ABILITIES.regen * dt)
 			"metalloid":
-				e.immune = fmod(e.ability_t, Bal.ABILITIES.phaseEvery) > Bal.ABILITIES.phaseEvery - Bal.ABILITIES.phaseTime
+				e.immune = not unmade and fmod(e.ability_t, Bal.ABILITIES.phaseEvery) > Bal.ABILITIES.phaseEvery - Bal.ABILITIES.phaseTime
 			"noble":
-				if time - e.last_hit_t > Bal.ABILITIES.shieldDelay and e.shield < e.shield_max:
+				if not unmade and time - e.last_hit_t > Bal.ABILITIES.shieldDelay and e.shield < e.shield_max:
 					e.shield = minf(e.shield_max, e.shield + e.shield_max * Bal.ABILITIES.shieldRecharge * dt)
 			"alkaline":
 				if e.ability_t >= Bal.ABILITIES.bearerEvery:
@@ -1301,6 +1454,9 @@ func _step_enemies(dt: float) -> void:
 			v *= Bal.ABILITIES.alkaliMult
 		if e.arch == "roller" and e.route.near_corner(e.d, 2.5):
 			v *= Bal.ARCH.rollerBrake
+		if e.stun_t > 0.0:
+			e.stun_t -= dt
+			v = 0.0
 		e.chewing = 0
 		if not e.overland:
 			for rp in road_pieces:
@@ -1386,17 +1542,24 @@ func damage(e: SimEnemy, amount: float, t: SimTower, o: Dictionary = {}) -> floa
 			diff = TAU - diff
 		if diff < PI / 3.0:
 			m *= Bal.ARCH.nautilusFront
+	if e.vuln_t > 0.0:
+		m *= 1.0 + e.vuln
+	var pierce_armor := false
+	if t != null:
+		m *= t.aura_mult
+		pierce_armor = t.mods.has("armor")
 	var dmg := amount * m
 	var crit := false
 	if t != null and not t.stats.is_empty() and t.stats.critChance > 0.0 and not is_dot and combat.chance(t.stats.critChance):
 		dmg *= Bal.GLYPHS.critMult
 		crit = true
 	var unit: float = wave.get("unitHp", 50.0)
-	if e.ability == "transition" and not is_dot:
-		dmg = maxf(dmg * Bal.ABILITIES.armorFloor, dmg - Bal.ABILITIES.armor * unit)
+	if e.ability == "transition" and not is_dot and not pierce_armor:
+		var arm: float = Bal.ABILITIES.armor * unit * (0.5 if e.unmade_t > 0.0 else 1.0)
+		dmg = maxf(dmg * Bal.ABILITIES.armorFloor, dmg - arm)
 	if not is_dot:
 		e.last_hit_t = time
-	if e.shield > 0.0 and not o.get("ignoreShield", false):
+	if e.shield > 0.0 and not o.get("ignoreShield", false) and not pierce_armor:
 		var s := minf(e.shield, dmg)
 		e.shield -= s
 		dmg -= s
@@ -1458,6 +1621,15 @@ func _kill(e: SimEnemy, t: SimTower) -> void:
 	base.essence += essence
 	if t != null:
 		t.kills += 1
+		var sp: int = t.mods.get("spread", 0)
+		if sp > 0 and not e.dots.is_empty():
+			for o in _near(t, e, sp, 3.0):
+				for dd in e.dots:
+					if dd.kind in ["evo", "burn", "virus", "poison"]:
+						_add_dot(o, dd.duplicate())
+				events.append({"t": "bolt", "x1": e.x, "y1": e.y, "x2": o.x, "y2": o.y, "miss": false, "towerId": t.id, "spread": true})
+		if t.tech == "alchemy" and tech_level("alchemy") >= 5:
+			_puddle(e.x, e.y, 1.4, t.stats.dps * 0.25, t.id, 3.0)
 	if e.golden:
 		add_piece(stream.make(combat.pick(["T", "L", "I", "O"]), "gold", "", true), true)
 	if e.boss and e.shed < 5:
@@ -1521,24 +1693,94 @@ func in_range(t: SimTower, e: SimEnemy, r: float) -> bool:
 	return (e.x - t.cx) * (e.x - t.cx) + (e.y - t.cy) * (e.y - t.cy) <= rr * rr
 
 
+## Score of an enemy under a targeting priority (section 9.1). Higher is better; always > 0.
+func priority_score(pr: String, e: SimEnemy, ox: float, oy: float) -> float:
+	var prog := e.d / e.route.length if e.route.length > 0.0 else 0.0
+	var sc := 0.0
+	match pr:
+		"last": sc = 1.01 - prog
+		"most": sc = e.threat() + 0.01
+		"least": sc = 1.0 / (1.0 + e.threat())
+		"fastest": sc = e.speed * e.slow_mult + 0.01
+		"slowest": sc = 1.0 / (0.1 + e.speed * e.slow_mult)
+		"strongest": sc = e.hp + 0.01
+		"weakest": sc = 1.0 / (1.0 + e.hp)
+		"specials": sc = prog + 0.01 + (10.0 if (e.ability != "" or e.special != "" or e.boss or e.champion) else 0.0)
+		"air": sc = prog + 0.01 + (10.0 if (e.airborne or e.arch == "balloon") else 0.0)
+		"closest": sc = 1.0 / (0.5 + Vector2(e.x - ox, e.y - oy).length())
+		_: sc = prog + 0.01
+	if e.immune:
+		sc *= 0.1
+	return sc
+
+
 func _pick_target(t: SimTower, r: float) -> SimEnemy:
 	var best: SimEnemy = null
 	var best_score := -INF
-	var missile := t.type == "Missile"
+	var cur: SimEnemy = null
+	var cur_score := 0.0
+	var pr := t.priority if t.priority != "" else "first"
 	for e in enemies:
 		if not can_hit(t, e) or not in_range(t, e, r):
 			continue
-		var score := e.d / e.route.length
-		if e.arch == "walker" or e.boss or e.champion:
-			score += 10.0
-		if missile and (e.arch == "balloon" or e.size == "giant"):
-			score += 5.0
-		if e.immune:
-			score -= 3.0
+		var score := priority_score(pr, e, t.cx, t.cy)
+		if e.id == t.target_id:
+			cur = e
+			cur_score = score
 		if score > best_score:
 			best_score = score
 			best = e
+	# hysteresis: keep the current target unless another beats it by 15%
+	if cur != null and best_score <= cur_score * Bal.TARGET_HYSTERESIS:
+		return cur
 	return best
+
+
+## Swing the turret toward (x, y) at its turn rate. True when aligned enough to fire.
+func _aim(t: SimTower, x: float, y: float, dt: float) -> bool:
+	var want := atan2(y - t.cy, x - t.cx)
+	var diff := wrapf(want - t.angle, -PI, PI)
+	var rate: float = Bal.TURN_RATE.get(t.type, 6.0) * (1.6 if t.base_tower else 1.0)
+	var stepa := rate * dt
+	if absf(diff) <= stepa:
+		t.angle = want
+	else:
+		t.angle = wrapf(t.angle + signf(diff) * stepa, -PI, PI)
+	t.aligned = absf(wrapf(want - t.angle, -PI, PI)) < Bal.AIM_TOLERANCE
+	return t.aligned
+
+
+## Current target for a tracking tower, re-evaluated 10 times a second (with hysteresis).
+func _track(t: SimTower, r: float, dt: float) -> SimEnemy:
+	t.retarget_t -= dt
+	var cur := _enemy_by_id(t.target_id) if t.target_id != 0 else null
+	if cur != null and not (can_hit(t, cur) and in_range(t, cur, r)):
+		cur = null
+	if cur == null or t.retarget_t <= 0.0:
+		t.retarget_t = 0.1
+		cur = _pick_target(t, r)
+	t.target_id = cur.id if cur != null else 0
+	return cur
+
+
+## Support auras: Crystal Ward towers buff neighbours; Aether level 5 links Aether towers.
+func _refresh_auras() -> void:
+	var grid := tech_level("aether") >= 5
+	for t in towers:
+		t.aura_mult = 1.0
+	for w in towers:
+		var b: float = w.mods.get("buff", 0.0)
+		if b <= 0.0 and not (grid and w.tech == "aether"):
+			continue
+		for t in towers:
+			if t == w or t.stats.is_empty():
+				continue
+			var d2 := (t.cx - w.cx) * (t.cx - w.cx) + (t.cy - w.cy) * (t.cy - w.cy)
+			if b > 0.0 and d2 <= 36.0:
+				t.aura_mult += b
+			if grid and w.tech == "aether" and t.tech == "aether" and d2 <= 100.0 and w.id < t.id:
+				t.aura_mult += Bal.LIGHTHOUSE_GRID
+				w.aura_mult += Bal.LIGHTHOUSE_GRID
 
 
 func _step_towers(dt: float) -> void:
@@ -1547,6 +1789,10 @@ func _step_towers(dt: float) -> void:
 		if e.alive and e.ability == "halogen":
 			halogens.append(e)
 	var r2: float = Bal.ABILITIES.corrosiveRadius * Bal.ABILITIES.corrosiveRadius
+	_aura_t -= dt
+	if _aura_t <= 0.0:
+		_aura_t = 0.5
+		_refresh_auras()
 	for t in towers:
 		if not t.active or t.stats.is_empty() or t.activate_t < Bal.COMBAT.activateTime:
 			continue
@@ -1570,33 +1816,41 @@ func _fire_tower(t: SimTower, dt: float) -> void:
 	var s := t.stats
 	var def: Dictionary = Bal.TOWERS[t.type]
 	t.cooldown -= dt
+	t.fire_drop_t -= dt
 	if t.fire_flash > 0.0:
 		t.fire_flash -= dt
 	if def.kind == "beam":
-		var tgt := _enemy_by_id(t.ramp_target)
-		if tgt != null and not (can_hit(t, tgt) and in_range(t, tgt, s.range)):
-			tgt = null
+		var tgt := _track(t, s.range, dt)
 		if tgt == null:
-			tgt = _pick_target(t, s.range)
 			t.ramp_t = 0.0
-		t.ramp_target = tgt.id if tgt != null else 0
-		t.target_id = t.ramp_target
-		if tgt == null:
+			t.ramp_target = 0
 			return
-		t.ramp_t += dt
+		if tgt.id != t.ramp_target:
+			t.ramp_t = 0.0
+			t.ramp_target = tgt.id
+		if not _aim(t, tgt.x, tgt.y, dt):
+			return
+		t.ramp_t += dt * (1.2 if tech_level("aether") >= 2 else 1.0)
 		var lo: float = Bal.COMBAT.laserRampLo
 		var hi: float = Bal.COMBAT.laserRampHi
 		var mult := lo + (hi - lo) * minf(1.0, t.ramp_t / Bal.COMBAT.laserRampT)
-		t.angle = atan2(tgt.y - t.cy, tgt.x - t.cx)
 		damage(tgt, s.dps * dt * mult, t, {"beam": true, "fx": t.cx, "fy": t.cy})
+		var multi: int = t.mods.get("multi", 0)
+		if multi > 0 and tgt.alive:
+			for e in _near(t, tgt, multi, 5.0):
+				if in_range(t, e, s.range):
+					damage(e, s.dps * dt * mult * 0.6, t, {"beam": true})
+		if t.mods.has("fire") and t.fire_drop_t <= 0.0:
+			t.fire_drop_t = 0.35
+			_puddle(tgt.x, tgt.y, 0.9, s.dps * 0.3, t.id, t.mods.fire, "fire")
 		if t.cooldown <= 0.0:
 			t.cooldown = s.interval * 3.0
 			t.shots += 1
 			_on_hit_extras(t, tgt, s.damage * 3.0 * mult)
 		return
-	if t.cooldown > 0.0:
-		return
 	if def.kind == "aura":
+		if t.cooldown > 0.0:
+			return
 		var targets: Array[SimEnemy] = []
 		for e in enemies:
 			if targets.size() >= s.maxTargets:
@@ -1614,12 +1868,21 @@ func _fire_tower(t: SimTower, dt: float) -> void:
 			damage(e, s.damage, t, {"area": true})
 			if t.type == "Freezer":
 				_slow(e, Bal.COMBAT.freezerSlow, s.interval + 0.15)
+			if not t.mods.is_empty():
+				_evo_hit(t, e, s.damage, true)
 		return
-	var tgt2 := _pick_target(t, s.range)
-	t.target_id = tgt2.id if tgt2 != null else 0
+	var tgt2 := _track(t, s.range, dt)
 	if tgt2 == null:
 		return
-	t.angle = atan2(tgt2.y - t.cy, tgt2.x - t.cx)
+	var ax := tgt2.x
+	var ay := tgt2.y
+	if def.kind == "lob" or def.kind == "puddle":
+		var lp := tgt2.route.at(tgt2.d + tgt2.speed * tgt2.slow_mult * Bal.COMBAT.lobTime * 0.8)
+		ax = lp.x
+		ay = lp.y
+	var aligned := _aim(t, ax, ay, dt)
+	if t.cooldown > 0.0 or not aligned:
+		return
 	t.cooldown = maxf(t.cooldown + s.interval, s.interval * 0.5)
 	t.shots += 1
 	t.fire_flash = 0.08
@@ -1634,6 +1897,14 @@ func _fire_tower(t: SimTower, dt: float) -> void:
 		"homing":
 			projectiles.append(_proj("homing", t, tgt2, dmg, Bal.COMBAT.missileSpeed))
 			_shot_event(t, def.kind, tgt2.x, tgt2.y, color)
+			var sv: int = t.mods.get("salvo", 0)
+			var others := _near(t, tgt2, sv, 6.0)
+			for k in sv:
+				var e2: SimEnemy = others[k % others.size()] if not others.is_empty() else tgt2
+				var pr := _proj("homing", t, e2, dmg * 0.7, Bal.COMBAT.missileSpeed * (0.85 + 0.05 * k))
+				pr.sx += cos(k * 2.1) * 0.4
+				pr.sy += sin(k * 2.1) * 0.4
+				projectiles.append(pr)
 		"lob", "puddle":
 			var lead := tgt2.route.at(tgt2.d + tgt2.speed * tgt2.slow_mult * Bal.COMBAT.lobTime * 0.8)
 			var p := _proj("lob" if def.kind == "lob" else "acid", t, tgt2, dmg, 0.0)
@@ -1642,8 +1913,22 @@ func _fire_tower(t: SimTower, dt: float) -> void:
 			p.dur = Bal.COMBAT.lobTime
 			projectiles.append(p)
 			_shot_event(t, def.kind, lead.x, lead.y, color)
+			var sv2: int = t.mods.get("salvo", 0)
+			for k in sv2:
+				var pb := _proj("lob", t, tgt2, dmg * 0.5, 0.0)
+				var a := combat.range_f(0.0, TAU)
+				var rr := combat.range_f(0.8, 2.2)
+				pb.tx = lead.x + cos(a) * rr
+				pb.ty = lead.y + sin(a) * rr
+				pb.dur = Bal.COMBAT.lobTime * combat.range_f(0.9, 1.15)
+				projectiles.append(pb)
 		"hitscan":
-			_shot_event(t, def.kind, tgt2.x, tgt2.y, color)
+			var lp2: int = t.mods.get("pierce", 0)
+			if lp2 > 0:
+				_shot_event(t, "rail", t.cx + cos(t.angle) * s.range, t.cy + sin(t.angle) * s.range, color)
+				_line(t, t.angle, s.range, dmg * 0.8, lp2, tgt2)
+			else:
+				_shot_event(t, def.kind, tgt2.x, tgt2.y, color)
 			damage(tgt2, dmg, t, {"single": true, "ignoreShield": true, "fx": t.cx, "fy": t.cy})
 			_on_hit_extras(t, tgt2, dmg)
 		"pierce":
@@ -1691,6 +1976,8 @@ func _fire_tower(t: SimTower, dt: float) -> void:
 					continue
 				damage(e, dmg * (1.0 - Bal.COMBAT.flamerBurn), t, {"area": true, "fx": t.cx, "fy": t.cy})
 				_add_dot(e, {"kind": "burn", "dps": dmg * Bal.COMBAT.flamerBurn / s.interval / 2.0 * 0.5, "t": 2.0, "tower": t.id})
+				if not t.mods.is_empty():
+					_evo_hit(t, e, dmg, true)
 				n2 += 1
 		"virus":
 			var cand: Array[SimEnemy] = []
@@ -1712,6 +1999,8 @@ func _fire_tower(t: SimTower, dt: float) -> void:
 			for e in pool:
 				_shot_event(t, def.kind, e.x, e.y, color)
 				_add_dot(e, {"kind": "virus", "dps": s.dps, "t": Bal.COMBAT.virusDuration, "tower": t.id})
+				if not t.mods.is_empty():
+					_evo_hit(t, e, s.damage, true)
 
 
 func _shot_event(t: SimTower, kind: String, x2: float, y2: float, color: String) -> void:
@@ -1774,6 +2063,69 @@ func _on_hit_extras(t: SimTower, tgt: SimEnemy, dmg: float) -> void:
 				damage(e, dmg * 0.5, t, {"splash": true})
 		"green":
 			_add_dot(tgt, {"kind": "poison", "dps": dmg * 0.15, "t": 3.0, "tower": t.id})
+	if not t.mods.is_empty() and tgt.alive:
+		_evo_hit(t, tgt, dmg, false)
+
+
+## Branch effects on a hit (section 9.5). area = the hit came from an aura, cone or virus.
+func _evo_hit(t: SimTower, tgt: SimEnemy, dmg: float, area: bool) -> void:
+	var m := t.mods
+	if m.has("splash"):
+		var sr: float = m.splash
+		if not area:
+			events.append({"t": "explode", "x": tgt.x, "y": tgt.y, "r": sr, "color": t.stats.get("color", "")})
+		for e in _near(t, tgt, 6, sr):
+			damage(e, dmg * (0.25 if area else 0.5), t, {"splash": true, "area": true})
+	if not tgt.alive:
+		return
+	if m.has("dot"):
+		_add_dot(tgt, {"kind": "evo", "dps": dmg * float(m.dot), "t": 3.0, "tower": t.id})
+	if m.has("slow"):
+		_slow(tgt, m.slow[0], m.slow[1])
+	if m.has("stun"):
+		_stun(tgt, m.stun)
+	if m.has("knock") and not (tgt.boss or tgt.champion):
+		var kn: float = m.knock * (minf(1.0, t.stats.interval) if area else 1.0)
+		tgt.d = maxf(0.0, tgt.d - kn)
+	if m.has("vuln"):
+		tgt.vuln = maxf(tgt.vuln, m.vuln)
+		tgt.vuln_t = 3.0
+	if m.has("puddle") and (not area or t.fire_drop_t <= 0.0):
+		t.fire_drop_t = 1.5
+		_puddle(tgt.x, tgt.y, m.puddle, t.stats.dps * 0.4, t.id)
+
+
+func _stun(e: SimEnemy, secs: float) -> void:
+	if e.stun_cd > time:
+		return
+	if e.boss or e.champion:
+		secs *= 0.5
+	e.stun_t = maxf(e.stun_t, secs)
+	e.stun_cd = time + secs + 0.8
+	events.append({"t": "stun", "x": e.x, "y": e.y, "id": e.id})
+
+
+## Hits up to n enemies along a line (rail beams), skipping one already hit.
+func _line(t: SimTower, ang: float, length: float, dmg: float, n: int, skip: SimEnemy) -> void:
+	var ca := cos(ang)
+	var sa := sin(ang)
+	var hit := 0
+	for e in enemies:
+		if hit >= n or e == skip or not can_hit(t, e):
+			continue
+		var dx := e.x - t.cx
+		var dy := e.y - t.cy
+		var along := dx * ca + dy * sa
+		if along > 0.0 and along <= length and absf(-dx * sa + dy * ca) < 0.7 + e.radius * 0.5:
+			damage(e, dmg, t, {"beam": true, "ignoreShield": true})
+			hit += 1
+
+
+func _puddle(x: float, y: float, r: float, dps: float, tower_id: int, secs: float = -1.0, kind: String = "acid") -> void:
+	if secs < 0.0:
+		secs = Bal.COMBAT.acidLinger + (1.0 if tech_level("alchemy") >= 2 else 0.0)
+	puddles.append({"x": x, "y": y, "r": r, "t": secs, "dps": dps, "tower": tower_id, "maxTargets": 6, "kind": kind})
+	events.append({"t": "puddle", "x": x, "y": y, "r": r, "kind": kind, "secs": secs})
 
 
 func _tower_or_battery(id: int) -> SimTower:
@@ -1796,8 +2148,15 @@ func _step_projectiles(dt: float) -> void:
 			if k >= 1.0:
 				p.alive = false
 				if p.kind == "acid":
-					puddles.append({"x": p.tx, "y": p.ty, "r": tw.stats.area if tw != null else 2.0, "t": Bal.COMBAT.acidLinger, "dps": (tw.stats.dps if tw != null else 5.0) * 0.5, "tower": p.tower, "maxTargets": 5})
-					events.append({"t": "puddle", "x": p.tx, "y": p.ty, "r": tw.stats.area if tw != null else 2.0})
+					var pr: float = tw.stats.area if tw != null else 2.0
+					if tw != null and tw.mods.has("puddle"):
+						pr = maxf(pr, tw.mods.puddle)
+					_puddle(p.tx, p.ty, pr, (tw.stats.dps if tw != null else 5.0) * 0.5, p.tower)
+					if tw != null and tw.mods.has("vuln"):
+						for e in enemies:
+							if e.alive and Vector2(e.x - p.tx, e.y - p.ty).length() < pr:
+								e.vuln = maxf(e.vuln, tw.mods.vuln)
+								e.vuln_t = 3.0
 				else:
 					_explode(p, tw)
 			continue

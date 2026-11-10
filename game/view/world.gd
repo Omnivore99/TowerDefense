@@ -72,6 +72,13 @@ var sky_mat: ProceduralSkyMaterial
 var grid: MeshInstance3D
 var eco_view: EcoView
 var last_ground_version := -1
+var arsenal_view: ArsenalView
+## Kit placement: belt slot in hand (-1 = none) and its rotation.
+var kit_slot := -1
+var kit_rot := 0
+## Strike targeting: "" | "orbital" | "airstrike"; air strikes are aimed by dragging.
+var strike_mode := ""
+var strike_press: Variant = null
 ## Demo / screenshot mode (user args): --demo [--warp B,W,S] [--cam x,z,dist,yaw] [--shot path.png]
 var demo_bot: Bot
 var shot_path := ""
@@ -175,13 +182,25 @@ func _start_demo(args: PackedStringArray) -> void:
 		last_road_version = g.board.version
 		_build_core()
 		_resync_all()
+	if args.has("--select"):
+		var best: SimTower = null
+		for t in g.towers:
+			if t.type != "" and (best == null or t.mark * 100 + t.ground_count() > best.mark * 100 + best.ground_count()):
+				best = t
+		if best != null:
+			selected_tower = best.id
 	var cam := _arg(args, "--cam", "")
-	if cam.begins_with("enemy") and not g.enemies.is_empty():
+	if cam == "tower" and selected_tower != 0:
+		var st := g.tower_by_id(selected_tower)
+		cam_rig.target = Vector3(st.cx, 0, st.cy)
+		cam_rig.dist_goal = float(_arg(args, "--dist", "16"))
+		cam_rig.dist = cam_rig.dist_goal
+	elif cam.begins_with("enemy") and not g.enemies.is_empty():
 		var e0: SimEnemy = g.enemies[0]
 		cam_rig.target = Vector3(e0.x, 0, e0.y)
 		cam_rig.dist_goal = float(cam.split(",")[1]) if cam.contains(",") else 24.0
 		cam_rig.dist = cam_rig.dist_goal
-	elif cam != "" and not cam.begins_with("enemy"):
+	elif cam != "" and cam != "tower" and not cam.begins_with("enemy"):
 		var c := cam.split(",")
 		cam_rig.target = Vector3(float(c[0]), 0, float(c[1]))
 		cam_rig.dist_goal = float(c[2])
@@ -324,6 +343,14 @@ func _new_game(seed_value: int, mode: String, snapshot: Dictionary, tutorial: bo
 		eco_view.name = "Economy"
 		add_child(eco_view)
 	eco_view.setup(self, g.eco)
+	if arsenal_view == null:
+		arsenal_view = ArsenalView.new()
+		arsenal_view.name = "Arsenal"
+		add_child(arsenal_view)
+		arsenal_view.setup(self)
+	arsenal_view.clear_all()
+	kit_slot = -1
+	strike_mode = ""
 	last_revealed = 0
 	_build_core()
 	_resync_all()
@@ -362,6 +389,8 @@ func _resync_all() -> void:
 	for p in puddle_views:
 		p.queue_free()
 	puddle_views.clear()
+	if arsenal_view != null:
+		arsenal_view.clear_all()
 	for t in g.towers:
 		_tower_view(t)
 
@@ -405,6 +434,7 @@ func _process(delta: float) -> void:
 	_sync_projectiles()
 	_sync_misc(delta)
 	eco_view.sync(delta)
+	arsenal_view.sync(delta)
 	if core != null:
 		core.get_node("Heart").scale = Vector3.ONE * (1.0 + 0.06 * sin(Time.get_ticks_msec() * 0.003))
 		core_ring.rotation.z += delta * 0.6
@@ -423,6 +453,7 @@ func _process(delta: float) -> void:
 		if shot_wait <= 0.0:
 			var img := get_viewport().get_texture().get_image()
 			img.save_png(shot_path)
+			print("hud ", hud.size, " card ", hud.card.position, " ", hud.card.visible, " toasts ", hud.toasts.position, " sel ", selected_tower)
 			print("saved ", shot_path)
 			get_tree().quit()
 
@@ -462,8 +493,11 @@ func _handle_events(evs: Array) -> void:
 			"impact":
 				fx.burst(_w(e.x, e.y, 0.5), 6, 3.5, _glow_of(e.get("color", "gold")), 0.06, 0.3)
 			"puddle":
-				fx.burst(_w(e.x, e.y, 0.3), 10, 2.5, Color(0.6, 1.0, 0.3), 0.1, 0.5, "glob")
-				sfx.play_at("splat", _w(e.x, e.y, 0.3))
+				if e.get("kind", "acid") == "fire":
+					fx.burst(_w(e.x, e.y, 0.3), 4, 2.0, Color(1.0, 0.55, 0.15), 0.08, 0.5)
+				else:
+					fx.burst(_w(e.x, e.y, 0.3), 10, 2.5, Color(0.6, 1.0, 0.3), 0.1, 0.5, "glob")
+					sfx.play_at("splat", _w(e.x, e.y, 0.3))
 			"hit":
 				if e.get("crit", false):
 					fx.burst(_w(e.x, e.y, 0.8), 8, 4.0, Color(1, 0.95, 0.6), 0.08, 0.35)
@@ -516,12 +550,90 @@ func _handle_events(evs: Array) -> void:
 			"reject":
 				hud.toast(e.reason, Color(1, 0.6, 0.5), 1.4)
 				sfx.play("reject")
-			"smite":
-				var p := _w(e.x, e.y, 0.0)
-				fx.ribbon(p + Vector3(0, 60, 0), p, 1.2, Color(1, 0.85, 0.5), 0.5)
-				fx.explosion(p + Vector3(0, 0.4, 0), e.r, Color(1, 0.8, 0.4))
-				cam_rig.add_shake(0.8)
-				sfx.play_at("orbital", p)
+			"evolve":
+				_on_evolve(e)
+			"techUp":
+				hud.toast("%s level %d%s" % [Bal.TECH_NAME[e.tech], e.level, _tech_perk_text(e.tech, e.level)], Color(1, 0.85, 0.45), 2.6)
+				sfx.play("bell")
+			"kitBought":
+				hud.toast("%s on the Kit belt" % Bal.KITS[e.kind].name, Color(0.9, 0.85, 0.7), 1.4)
+				sfx.play("click")
+			"kitBuilt":
+				hud.toast("%s built on the base ring" % Bal.KITS[e.kind].name, Color(1, 0.82, 0.45), 1.8)
+				sfx.play("bell")
+			"kitPlaced":
+				var kp := _w(e.x, e.y, 0.1)
+				fx.smoke(kp, 6, Color(0.5, 0.45, 0.38, 0.6), 0.25, 0.9, 0.3)
+				sfx.play_at("place", kp, -2.0, 1.2)
+				sfx.play_at("click", kp, 0.0, 0.8)
+			"trap":
+				_on_trap(e)
+			"shove":
+				var sp := _w(e.x, e.y, 1.0)
+				if e.timed:
+					fx.ring(_w(e.x, e.y, 0.2), 0.4, 3.0, 0.5, Color(1, 0.85, 0.35, 0.9))
+					sfx.play_at("chime", sp, 0.0, 1.0 + 0.1 * e.amp)
+				else:
+					fx.ring(_w(e.x, e.y, 0.2), 0.3, 1.8, 0.35, Color(0.9, 0.9, 1.0, 0.5))
+					sfx.play_at("tap", sp)
+			"tick":
+				var tp2 := _w(e.x, e.y, 1.6)
+				var steps := [0, 2, 4, 5, 7, 9]
+				var st: int = steps[clampi(int(e.amp * 5.0), 0, 5)]
+				sfx.play_at("tick", tp2, -6.0 + 4.0 * minf(1.0, e.amp), pow(2.0, (st + (0 if e.side > 0 else -5)) / 12.0))
+				var mc: Color = ArsenalView.KIND_COLOR.get(e.kind, Color.WHITE)
+				fx.ring(_w(e.x, e.y, 0.15), 0.6, Bal.METRONOME.radius * minf(1.0, e.amp + 0.3), 0.45, Color(mc.r, mc.g, mc.b, 0.35 + 0.3 * minf(1.0, e.amp)))
+				if e.kind == "thunder":
+					cam_rig.add_shake(0.05 * e.amp)
+			"howitzer":
+				var mz := arsenal_view.fire_howitzer(e.pad)
+				if mz != Vector3.ZERO:
+					fx.burst(mz, 16, 7.0, Color(1, 0.75, 0.35), 0.12, 0.3)
+					fx.smoke(mz, 8, Color(0.55, 0.52, 0.5, 0.6), 0.4, 1.6, 0.6)
+				fx.ring(_w(e.x, e.y, 0.1), 0.5, 4.5, 0.6, Color(0.7, 0.62, 0.5, 0.5))
+				cam_rig.add_shake(0.2)
+				sfx.play_at("boom", _w(e.x, e.y, 0.5), 2.0, 0.6)
+				get_tree().create_timer(maxf(0.1, e.dur / speed - 0.9)).timeout.connect(func(): sfx.play_at("whistle", _w(e.tx, e.ty, 6.0)))
+			"shellHit":
+				fx.mushroom(_w(e.x, e.y, 0.1), e.r)
+				cam_rig.add_shake(0.5)
+				sfx.play_at("boom", _w(e.x, e.y, 0.5), 4.0, 0.7)
+				get_tree().create_timer(0.35).timeout.connect(func(): sfx.play_at("thunder", _w(e.x, e.y, 0.5), -6.0, 0.6))
+			"blast":
+				var bp := _w(e.x, e.y, 0.2)
+				if e.kind == "orbital":
+					fx.beam(bp, 1.0)
+					fx.explosion(bp, e.r * 1.4, Color(0.7, 0.85, 1.0))
+					fx.ring(bp, e.r, Bal.ORBITAL.r1, Bal.ORBITAL.delay, Color(0.75, 0.9, 1.0, 0.9))
+					cam_rig.add_shake(1.0)
+					sfx.play_at("orbital", bp, 4.0)
+				else:
+					fx.explosion(bp, e.r, Color(1, 0.6, 0.3))
+					sfx.play_at("boom", bp, -3.0, randf_range(0.9, 1.2))
+					cam_rig.add_shake(0.12)
+			"airstrike":
+				_on_airstrike(e)
+			"orbital":
+				var op := _w(e.x, e.y, 0.15)
+				fx.ring(op, Bal.ORBITAL.r1 * 1.2, Bal.ORBITAL.r0 * 0.5, e.delay, Color(0.6, 0.85, 1.0, 0.95))
+				fx.ribbon(op + Vector3(0, 70, 0), op, 0.15, Color(0.7, 0.9, 1.0, 0.8), e.delay)
+				strike_mode = ""
+			"strikeReady":
+				hud.toast(("Orbital strike ready (O)" if e.kind == "orbital" else "Air strike ready (X)"), Color(0.7, 0.9, 1.0), 1.8)
+				sfx.play("bell", -4.0)
+			"ramFire":
+				var rp2 := _w(e.x, e.y, 1.1)
+				fx.smoke(rp2, 8, Color(0.6, 0.6, 0.62, 0.6), 0.3, 1.2, 0.5)
+				sfx.play_at("missile", rp2, 0.0, 0.8 if e.variant == "impact" else 1.2)
+			"ramHit":
+				if e.get("fizzle", false):
+					fx.smoke(_w(e.x, e.y, 0.3), 6)
+				else:
+					fx.explosion(_w(e.x, e.y, 0.3), e.r, Color(1, 0.6, 0.25))
+					cam_rig.add_shake(0.3)
+					sfx.play_at("boom", _w(e.x, e.y, 0.5), 2.0)
+			"stun":
+				fx.ring(_w(e.x, e.y, 0.9), 0.2, 0.7, 0.3, Color(0.75, 0.9, 1.0, 0.8), false)
 			"mine":
 				fx.explosion(_w(e.x, e.y, 0.2), 1.3, Color(1, 0.55, 0.3))
 				sfx.play_at("boom", _w(e.x, e.y, 0.2), -3.0)
@@ -577,6 +689,79 @@ func _handle_events(evs: Array) -> void:
 				sfx.play("bell")
 			"recycle":
 				hud.toast("+%d ◆" % int(e.essence), Color(1, 0.85, 0.45), 1.0)
+
+
+func _tech_perk_text(tech: String, lv: int) -> String:
+	if lv == 2:
+		return {"steam": ": casings and shells +10%", "aether": ": beams ramp 20% faster", "alchemy": ": puddles last +1 s"}[tech]
+	if lv == 5:
+		return {"steam": ": Iron Rain (cluster shells)", "aether": ": Lighthouse Grid (linked towers +15%)", "alchemy": ": Bloom (kills leave puddles)"}[tech]
+	return ""
+
+
+func _on_evolve(e: Dictionary) -> void:
+	var tv: TowerView = tower_views.get(e.towerId)
+	if tv != null:
+		tv.hammer_cb = func(v: TowerView):
+			var hp := v.global_position + Vector3(v.tower.cx + randf_range(-0.5, 0.5), v.top_y + randf_range(0.3, 1.2), v.tower.cy + randf_range(-0.5, 0.5))
+			fx.burst(hp, 5, 3.0, Color(1, 0.8, 0.45), 0.05, 0.25)
+			sfx.play_at("tap", hp, -4.0, randf_range(0.8, 1.1))
+		tv.rebuild()
+	var p := _w(e.x, e.y, 0.2)
+	get_tree().create_timer(Bal.PHI / maxf(0.5, speed)).timeout.connect(func():
+		fx.ring(p, 0.4, 4.0, 0.6, Color(1, 0.8, 0.4, 0.9))
+		fx.burst(p + Vector3(0, 1.5, 0), 36, 6.0, Color(1, 0.85, 0.45), 0.09, 0.7)
+		sfx.play_at("activate", p, 0.0, 1.0 + 0.1 * e.mark))
+	var t := g.tower_by_id(e.towerId)
+	if t != null:
+		var bd := Evolve.branch_def(t)
+		hud.toast("%s Mk %s%s" % [t.type, ["I", "II", "III", "IV"][e.mark - 1], (": " + bd.name) if not bd.is_empty() else ""], Color(1, 0.85, 0.45), 2.0)
+
+
+func _on_trap(e: Dictionary) -> void:
+	var p := _w(e.x, e.y, 0.2)
+	match e.kind:
+		"landmine":
+			fx.explosion(p, e.r, Color(1, 0.55, 0.3))
+			cam_rig.add_shake(0.35)
+			sfx.play_at("boom", p, 2.0, 0.9)
+		"betty":
+			var up := p + Vector3(0, 1.5, 0)
+			fx.burst(p, 6, 3.0, Color(0.5, 0.45, 0.4), 0.08, 0.4, "debris", 10.0)
+			fx.explosion(up, e.r, Color(1, 0.7, 0.35))
+			cam_rig.add_shake(0.25)
+			sfx.play_at("boom", up, 0.0, 1.2)
+		"claymore":
+			for i in 24:
+				var a: float = e.dir + randf_range(-0.6, 0.6)
+				fx.emit("spark", p + Vector3(0, 0.3, 0), Vector3(cos(a), 0.05, sin(a)) * randf_range(10.0, 16.0), 0.35, 0.05, Color(1, 0.85, 0.5), 2.0)
+			fx.smoke(p, 6)
+			cam_rig.add_shake(0.2)
+			sfx.play_at("boom", p, 0.0, 1.4)
+		"spike":
+			arsenal_view.spike_punch(e.id)
+			fx.burst(_w(e.x, e.y, 0.5), 6, 2.5, Color(0.8, 0.15, 0.15), 0.06, 0.4, "glob", 8.0)
+			sfx.play_at("tap", p, -2.0, 1.3)
+		"tarFire":
+			fx.explosion(p, 2.0, Color(1, 0.5, 0.15))
+			sfx.play_at("jet", p, 4.0, 0.6)
+
+
+func _on_airstrike(e: Dictionary) -> void:
+	var dir: float = e.dir
+	var d := Vector3(cos(dir), 0, sin(dir))
+	var mid := _w(e.x, e.y, 6.0)
+	var wing := Node3D.new()
+	misc_root.add_child(wing)
+	Kit.add(wing, Kit.box(Vector3(1.6, 0.12, 3.2)), Kit.dark_iron())
+	Kit.add(wing, Kit.box(Vector3(0.3, 0.1, 3.4)), Kit.glow(Color(1, 0.4, 0.2), 3.0), Vector3(-0.7, 0, 0))
+	wing.rotation.y = -dir
+	wing.position = mid - d * 40.0
+	var tw := wing.create_tween()
+	tw.tween_property(wing, "position", mid + d * 40.0, 0.8 / maxf(0.5, speed))
+	tw.tween_callback(wing.queue_free)
+	sfx.play_at("jet", mid, 4.0)
+	strike_mode = ""
 
 
 ## The Lance on the base fires a needle across the map (0.382 s), then the pimple bursts.
@@ -740,6 +925,8 @@ func _on_phase(p: String) -> void:
 		"calm":
 			if g.wave_index == 0:
 				hud.toast("Board %d" % g.board_no, Color(1, 0.82, 0.45), 2.0)
+				if g.base.freeTech and playing:
+					open_tech()
 		"cleared":
 			_sync_road_pieces(true)
 			SaveIO.log_metrics(g.metrics)
@@ -988,6 +1175,10 @@ func _sync_misc(delta: float) -> void:
 		if m2.visible:
 			var pd: Dictionary = g.puddles[i]
 			m2.position = _w(pd.x, pd.y, 0.04)
+			var fire: bool = pd.get("kind", "acid") == "fire"
+			if m2.get_meta("fire", false) != fire:
+				m2.set_meta("fire", fire)
+				m2.material_override = Kit.glow(Color(1.0, 0.45, 0.12, 0.7), 2.5) if fire else Kit.glow(Color(0.45, 0.9, 0.2, 0.6), 1.2)
 			var s: float = pd.r * clampf(pd.t / 0.5, 0.2, 1.0)
 			m2.scale = Vector3(s, 1, s)
 
@@ -1022,6 +1213,9 @@ func _cur_piece() -> Variant:
 
 
 func _update_ghost() -> void:
+	if kit_slot >= 0 or strike_mode != "":
+		_update_kit_ghost()
+		return
 	var p: Variant = _cur_piece()
 	if p == null and not selected.is_empty():
 		selected = {}
@@ -1092,6 +1286,243 @@ func _update_ghost() -> void:
 			txt += "\n" + "   ".join(extra)
 	hud.set_hint(txt + "\n[color=#8a93a6]R rotate · F mirror · H hold · right-click a slot to hold[/color]")
 	_update_range_preview(pv if ok else null)
+
+
+func _update_kit_ghost() -> void:
+	var cell := _cell_under(mouse_pos)
+	grid.visible = false
+	if strike_mode != "":
+		ghost.visible = false
+		if strike_mode == "orbital":
+			hud.set_hint("[b]Orbital strike[/b]: click a target  [color=#8a93a6]55 × unit HP at the centre, a ring out to 8 cells · right-click cancels[/color]")
+			var hit: Variant = cam_rig.ground_at(mouse_pos, 0.0)
+			if hit != null:
+				_show_ring(Vector2(hit.x, hit.z), Bal.ORBITAL.r1)
+		else:
+			hud.set_hint("[b]Air strike[/b]: press on a point and drag to set the direction  [color=#8a93a6]13 blasts in a 3 × 13 line · right-click cancels[/color]")
+			_show_ring(Vector2(Board.CORE_PT.x, Board.CORE_PT.y), g.arsenal.airstrike_radius())
+		return
+	if kit_slot >= g.arsenal.belt.size() or g.arsenal.belt[kit_slot] == "":
+		kit_slot = -1
+		return
+	var id: String = g.arsenal.belt[kit_slot]
+	var sig := "kit|%s|%d|%d,%d|%d" % [id, kit_rot, cell.x, cell.y, g.board.version]
+	ghost.visible = playing and cell.x > -100
+	if sig == ghost_sig:
+		return
+	ghost_sig = sig
+	for c in ghost.get_children():
+		c.queue_free()
+	var pv := g.arsenal.preview(g, id, kit_rot, cell.x, cell.y)
+	var mat := Kit.ghost_mat(pv.ok)
+	for c in pv.cells:
+		var top: float = g.board.h(c.x, c.y) * Kit.LH if Board.in_grid(c.x, c.y) else 0.0
+		Kit.add(ghost, Kit.box(Vector3(0.94, 0.12, 0.94)), mat, Vector3(c.x + 0.5, top + 0.08, c.y + 0.5))
+	var k: Dictionary = Bal.KITS[id]
+	var txt := "[b]%s[/b]  [color=#8a93a6]%s[/color]" % [k.name, k.note]
+	if not pv.ok:
+		txt = "[color=#ff8a7a]%s[/color]  " % pv.reason + txt
+	hud.set_hint(txt + "\n[color=#8a93a6]R rotate · right-click cancels[/color]")
+	if id.begins_with("metronome"):
+		var c0: Vector2i = pv.cells[0]
+		_show_ring(Vector2(c0.x + 1.0, c0.y + 1.0), Bal.METRONOME.radius)
+	else:
+		range_ring.visible = false
+
+
+func select_kit(i: int) -> void:
+	if i < 0 or i >= g.arsenal.belt.size() or g.arsenal.belt[i] == "":
+		return
+	selected = {}
+	strike_mode = ""
+	kit_slot = i if kit_slot != i else -1
+	ghost_sig = ""
+	sfx.play("click")
+
+
+func begin_strike(kind: String) -> void:
+	var ok: bool = g.can_orbital() if kind == "orbital" else g.can_airstrike()
+	if not ok:
+		var pad: Dictionary = g.arsenal.orbital_pad() if kind == "orbital" else g.arsenal.airstrike_pad()
+		hud.toast(("Build the %s in the Armory first" % Bal.KITS[kind].name) if pad.is_empty() else ("Recharging: %d s" % ceili(pad.cd if kind == "orbital" else Bal.AIRSTRIKE.every - pad.charge)), Color(1, 0.6, 0.5), 1.4)
+		return
+	selected = {}
+	kit_slot = -1
+	strike_mode = kind
+	sfx.play("click")
+
+
+func cycle_priority() -> void:
+	if selected_tower == 0:
+		return
+	var pr := g.cycle_priority(selected_tower)
+	hud.toast("Target: %s" % Bal.PRIORITY_LABEL.get(pr, pr), Color(0.9, 0.9, 1.0), 1.0)
+	sfx.play("click")
+
+
+func set_all_priority() -> void:
+	var t := g.tower_by_id(selected_tower)
+	if t == null:
+		return
+	g.set_priority(t.id, t.priority, true)
+	hud.toast("Every %s: %s" % [t.type, Bal.PRIORITY_LABEL.get(t.priority, t.priority)], Color(0.9, 0.9, 1.0), 1.2)
+
+
+func _effects_text(m: Dictionary) -> String:
+	var out: PackedStringArray = []
+	for k in m:
+		var v: Variant = m[k]
+		match k:
+			"dmg": out.append("damage ×%.1f" % v)
+			"range": out.append("range ×%.2f" % v)
+			"rate": out.append("fire rate ×%.1f" % v)
+			"pierce": out.append("pierces %d" % v)
+			"chain": out.append("chains +%d" % v)
+			"salvo": out.append("+%d per salvo" % v)
+			"splash": out.append("splash %.1f cells" % v)
+			"dot": out.append("damage over time %d%%/s" % roundi(v * 100))
+			"slow": out.append("slows to %d%%" % roundi(v[0] * 100))
+			"stun": out.append("stuns %.1f s" % v)
+			"knock": out.append("knockback %.1f" % v)
+			"vuln": out.append("marked: +%d%% damage taken" % roundi(v * 100))
+			"buff": out.append("nearby towers +%d%%" % roundi(v * 100))
+			"armor": out.append("ignores armour and shields")
+			"spread": out.append("spreads on kill")
+			"multi": out.append("+%d beams" % v)
+			"puddle": out.append("leaves puddles (%.1f)" % v)
+			"fire": out.append("sets the road on fire %.0f s" % v)
+	return ", ".join(out)
+
+
+func open_evolve() -> void:
+	var t := g.tower_by_id(selected_tower)
+	if t == null or t.type == "" or t.mark >= 4:
+		return
+	var back := func():
+		hud.close_modal()
+	if t.mark == 1:
+		var c := Evolve.cost(t, -1)
+		var err := g.evolve_blocked(t.id)
+		hud.open_modal("Evolve %s to Mk II" % t.type, "[b]+30%% damage, +10%% range[/b], lanterns and crenellations.\nCost: %s%s" % [Evolve.cost_text(c), ("\n[color=#ff8a7a]%s[/color]" % err) if err != "" else ""], [
+			["Evolve", func():
+				if g.evolve(t.id) == "":
+					hud.close_modal()],
+			["Close", back]], 520)
+		return
+	if t.mark == 3:
+		var bd := Evolve.branch_def(t)
+		var c3 := Evolve.cost(t, t.branch)
+		var err3 := g.evolve_blocked(t.id, t.branch)
+		hud.open_modal("Capstone: %s Mk IV" % bd.name, "[color=#ffd9a0]%s[/color]\n%s\nA bigger model ringed with light.\nCost: %s  [color=#8a93a6]needs %s level %d[/color]%s" % [bd.tags, _effects_text(bd.m4), Evolve.cost_text(c3), Bal.TECH_NAME[bd.tech], Bal.EVO.mk4.techLevel, ("\n[color=#ff8a7a]%s[/color]" % err3) if err3 != "" else ""], [
+			["Evolve", func():
+				if g.evolve(t.id, t.branch) == "":
+					hud.close_modal()],
+			["Close", back]], 560)
+		return
+	var vb: VBoxContainer = hud.open_modal("Choose a branch for %s" % t.type, "[color=#8a93a6]The choice is permanent for this tower. Mk III gives 1 tech point; Mk IV gives 2.[/color]", [["Close", back]], 760)
+	var hb := HBoxContainer.new()
+	hb.add_theme_constant_override("separation", 12)
+	vb.add_child(hb)
+	vb.move_child(hb, 2)
+	var bs := Evolve.branches(t.type)
+	for i in bs.size():
+		var b: Dictionary = bs[i]
+		var pc := PanelContainer.new()
+		pc.custom_minimum_size = Vector2(360, 0)
+		hb.add_child(pc)
+		var col := VBoxContainer.new()
+		pc.add_child(col)
+		var rt := RichTextLabel.new()
+		rt.bbcode_enabled = true
+		rt.fit_content = true
+		rt.custom_minimum_size = Vector2(340, 0)
+		var err2 := g.evolve_blocked(t.id, i)
+		rt.text = "[font_size=18][color=%s]%s %s[/color][/font_size]\n[b]%s[/b]\n[color=#ffd9a0]%s[/color]\nMk III: %s\nMk IV: %s\nCost: %s%s" % [Hud.TECH_COLOR[b.tech], Hud.TECH_ICON[b.tech], Bal.TECH_NAME[b.tech], b.name, b.tags, _effects_text(b.m3), _effects_text(b.m4), Evolve.cost_text(Evolve.cost(t, i)), ("\n[color=#ff8a7a]%s[/color]" % err2) if err2 != "" else ""]
+		col.add_child(rt)
+		var btn := Button.new()
+		btn.text = "Evolve to %s" % b.name
+		btn.disabled = err2 != ""
+		btn.pressed.connect(func():
+			if g.evolve(t.id, i) == "":
+				hud.close_modal())
+		col.add_child(btn)
+	hud.call_deferred("_recentre")
+
+
+func open_tech() -> void:
+	var lines: PackedStringArray = []
+	for k in Bal.TECHS:
+		var pts: int = g.base.tech[k]
+		var lv := g.tech_level(k)
+		lines.append("[color=%s]%s %s[/color]  level [b]%d[/b]  [color=#8a93a6](%d points%s)[/color]" % [Hud.TECH_COLOR[k], Hud.TECH_ICON[k], Bal.TECH_NAME[k], lv, pts, (", %d to next" % Evolve.points_to_next(pts)) if lv < 5 else ""])
+	var body := "\n".join(lines) + "\n\n[color=#8a93a6]Mk III evolutions give 1 point, Mk IV give 2. Levels need 1, 2, 3, 5, 8 points. Level 2 perks, level 5 ultimates.[/color]"
+	if g.base.freeTech:
+		body = "[color=#ffcf6b]Pick your first technology: it opens at level 1 for free.[/color]\n\n" + body
+	var btns: Array = []
+	for k in Bal.TECHS:
+		var c := g.tech_open_cost(k)
+		if c >= 0.0:
+			btns.append(["Open %s%s" % [Bal.TECH_NAME[k], "" if c == 0.0 else " (%d ◆)" % int(c)], func():
+				var err := g.open_tech(k)
+				if err != "":
+					hud.toast(err, Color(1, 0.6, 0.5), 1.4)
+				else:
+					open_tech()])
+	btns.append(["Close", func(): hud.close_modal()])
+	hud.open_modal("Technologies", body, btns, 640)
+
+
+func open_armory() -> void:
+	var vb: VBoxContainer = hud.open_modal("Armory", "[color=#8a93a6]Road kits go on the Kit belt (Shift+1–6); base-ring kits are built on a pad around the core. %s[/color]" % ("" if g.has_building("armory") else "Build the Armory at the base to unlock everything but Landmines and Spike traps."), [["Close", func(): hud.close_modal()]], 720)
+	var grid := GridContainer.new()
+	grid.columns = 3
+	grid.add_theme_constant_override("h_separation", 12)
+	vb.add_child(grid)
+	vb.move_child(grid, 2)
+	for id in Bal.KIT_ORDER:
+		var k: Dictionary = Bal.KITS[id]
+		var l := RichTextLabel.new()
+		l.bbcode_enabled = true
+		l.fit_content = true
+		l.custom_minimum_size = Vector2(420, 0)
+		l.text = "[b]%s[/b]  [color=#8a93a6]%s[/color]" % [k.name, k.note]
+		grid.add_child(l)
+		var cl := Label.new()
+		cl.text = Evolve.cost_text(k.cost)
+		grid.add_child(cl)
+		var b := Button.new()
+		var err: String = g.arsenal.kit_blocked(g, id)
+		b.text = "Buy" if err == "" else err
+		b.disabled = err != ""
+		b.pressed.connect(func():
+			var e2 := g.buy_kit(id)
+			if e2 != "":
+				hud.toast(e2, Color(1, 0.6, 0.5), 1.4)
+			open_armory())
+		grid.add_child(b)
+	for i in 6:
+		var pd: Dictionary = g.arsenal.pads[i]
+		if pd.get("kind", "") != "howitzer":
+			continue
+		var hb := HBoxContainer.new()
+		vb.add_child(hb)
+		vb.move_child(hb, vb.get_child_count() - 2)
+		var hl := Label.new()
+		hl.text = "Howitzer %d:" % (i + 1)
+		hb.add_child(hl)
+		for u in Arsenal.PAD_UPGRADES:
+			var ub := Button.new()
+			var info: Dictionary = Arsenal.PAD_UPGRADES[u]
+			ub.text = "%s %s" % [info.name, "✓" if pd.get(u, 0) > 0 else "(%d ⬢)" % int(info.cost)]
+			ub.tooltip_text = info.note
+			ub.disabled = pd.get(u, 0) > 0
+			ub.pressed.connect(func():
+				var e3: String = g.arsenal.upgrade_pad(g, i, u)
+				if e3 != "":
+					hud.toast(e3, Color(1, 0.6, 0.5), 1.4)
+				open_armory())
+			hb.add_child(ub)
+	hud.call_deferred("_recentre")
 
 
 func _update_range_preview(pv: Variant) -> void:
@@ -1226,6 +1657,18 @@ func _unhandled_input(ev: InputEvent) -> void:
 			MOUSE_BUTTON_LEFT:
 				if ev.pressed and playing and not hud.has_modal():
 					_click(ev.position)
+				elif not ev.pressed and strike_mode == "airstrike" and strike_press != null:
+					var hit: Variant = cam_rig.ground_at(ev.position, 0.0)
+					var a: Vector2 = strike_press
+					var dir := 0.0
+					if hit != null and Vector2(hit.x, hit.z).distance_to(a) > 1.5:
+						dir = (Vector2(hit.x, hit.z) - a).angle()
+					else:
+						dir = g.arsenal._road_dir(g, a.x, a.y)
+					strike_press = null
+					if not g.airstrike(a.x, a.y, dir):
+						hud.toast("Out of air-strike range" if g.can_airstrike() else "Air strike not ready", Color(1, 0.6, 0.5), 1.2)
+						strike_mode = ""
 		return
 	if ev is InputEventKey and ev.pressed and not ev.echo:
 		_key(ev.keycode)
@@ -1233,6 +1676,33 @@ func _unhandled_input(ev: InputEvent) -> void:
 
 func _click(pos: Vector2) -> void:
 	var cell := _cell_under(pos)
+	if strike_mode != "":
+		var hit: Variant = cam_rig.ground_at(pos, 0.0)
+		if hit == null:
+			return
+		if strike_mode == "orbital":
+			if not g.orbital(hit.x, hit.z):
+				hud.toast("Orbital strike not ready", Color(1, 0.6, 0.5), 1.2)
+				strike_mode = ""
+		else:
+			strike_press = Vector2(hit.x, hit.z)
+		return
+	if kit_slot >= 0:
+		var res0 := g.place_kit(kit_slot, kit_rot, cell.x, cell.y)
+		if res0.get("ok", false):
+			kit_slot = -1
+			ghost_sig = ""
+		return
+	# shove a metronome
+	if Board.in_grid(cell.x, cell.y):
+		var k := g.arsenal.kit_at_cell(Board.cell_idx(cell.x, cell.y))
+		if not k.is_empty() and k.has("amp"):
+			g.arsenal.shove(g, k.id)
+			return
+		if not k.is_empty() and k.has("variant"):
+			g.arsenal.retool_ram(k.id)
+			hud.toast("Ram retooled: %s" % ("impact" if k.variant == "impact" else "grinder"), Color(0.9, 0.85, 0.7), 1.2)
+			return
 	var p: Variant = _cur_piece()
 	if p != null:
 		var res := g.place(selected, rot, mirror, cell.x, cell.y)
@@ -1268,6 +1738,14 @@ func _auto_next() -> Dictionary:
 
 
 func _cancel() -> void:
+	if strike_mode != "":
+		strike_mode = ""
+		strike_press = null
+		return
+	if kit_slot >= 0:
+		kit_slot = -1
+		ghost_sig = ""
+		return
 	if not selected.is_empty():
 		selected = {}
 		ghost_sig = ""
@@ -1286,7 +1764,26 @@ func _key(k: Key) -> void:
 	match k:
 		KEY_R:
 			rot = (rot + 1) % 4
+			kit_rot = (kit_rot + 1) % 2
 			ghost_sig = ""
+		KEY_T:
+			cycle_priority()
+		KEY_K:
+			open_armory()
+		KEY_Y:
+			open_tech()
+		KEY_U:
+			open_evolve()
+		KEY_O:
+			begin_strike("orbital")
+		KEY_X:
+			begin_strike("airstrike")
+		KEY_G:
+			var hit: Variant = cam_rig.ground_at(mouse_pos, 0.0)
+			if hit != null:
+				var mid: int = g.arsenal.nearest_metronome(hit.x, hit.z)
+				if mid != 0:
+					g.arsenal.shove(g, mid)
 		KEY_F:
 			mirror = not mirror
 			ghost_sig = ""
@@ -1315,6 +1812,8 @@ func _key(k: Key) -> void:
 		KEY_V:
 			cam_rig.spectator = not cam_rig.spectator
 			hud.toast("Spectator camera " + ("on" if cam_rig.spectator else "off"), Color(0.8, 0.85, 1.0), 1.2)
+		KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6 when Input.is_key_pressed(KEY_SHIFT):
+			select_kit(k - KEY_1)
 		KEY_1, KEY_2, KEY_3:
 			select_source({"zone": "must", "index": k - KEY_1})
 		KEY_4, KEY_5, KEY_6, KEY_7:
@@ -1336,7 +1835,7 @@ func _title_screen() -> void:
 	buttons.append(["Relaxed", func(): start_run("relaxed", not meta.tutorialDone)])
 	buttons.append(["Normal", func(): start_run("normal", not meta.tutorialDone)])
 	buttons.append(["Golden", func(): start_run("golden", false)])
-	var vb := hud.open_modal("Satisfying TD", body, buttons, 560)
+	var vb: VBoxContainer = hud.open_modal("Satisfying TD", body, buttons, 560)
 	var hb2 := HBoxContainer.new()
 	var st := Button.new()
 	st.text = "Settings"
@@ -1371,7 +1870,7 @@ func _resume() -> void:
 
 
 func _settings_screen(from_title: bool) -> void:
-	var vb := hud.open_modal("Settings", "", [["Done", func():
+	var vb: VBoxContainer = hud.open_modal("Settings", "", [["Done", func():
 		SaveIO.save_settings(settings)
 		sfx.set_volumes(float(settings.volume), float(settings.music))
 		cam_rig.reduced_motion = settings.reducedMotion
@@ -1421,7 +1920,7 @@ func _base_screen() -> void:
 	var lance_txt := ""
 	if lv > 0 and lv < Bal.LANCE.charges.size():
 		lance_txt = "Upgrade Lance (%d ◆)" % Bal.LANCE.upgrade[lv - 1]
-	var vb := hud.open_modal("Your base", "Essence [color=#ffcf6b]%d ◆[/color] · Ore %d · Timber %d · Water %d · Pearls %d\n[color=#8a93a6]Ore converts to Essence at %d : 1.[/color]" % [int(g.base.essence), int(g.base.ore), int(g.base.timber), int(g.base.water), int(g.base.pearls), int(Bal.ORE_TO_ESSENCE)], [
+	var vb: VBoxContainer = hud.open_modal("Your base", "Essence [color=#ffcf6b]%d ◆[/color] · Ore %d · Timber %d · Water %d · Pearls %d\n[color=#8a93a6]Ore converts to Essence at %d : 1.[/color]" % [int(g.base.essence), int(g.base.ore), int(g.base.timber), int(g.base.water), int(g.base.pearls), int(Bal.ORE_TO_ESSENCE)], [
 		["Convert ore → ◆", func():
 			g.convert_ore()
 			_base_screen()],

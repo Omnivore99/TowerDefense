@@ -32,6 +32,24 @@ var undo_bar: ProgressBar
 var combo_label: Label
 var left_panel: PanelContainer
 var _sig := ""
+var kit_slots: Array[Button] = []
+var armory_btn: Button
+var orbital_btn: Button
+var air_btn: Button
+var tech_btn: Button
+var card_btns: HBoxContainer
+var prio_btn: Button
+var setall_btn: Button
+var evolve_btn: Button
+var _card_tower := 0
+var _kit_sig := ""
+const KIT_SHORT := {
+	"landmine": "Mine", "spike": "Spikes", "betty": "Betty", "claymore": "Claymore", "tar": "Tar pit",
+	"metronome_decay": "Decay ♪", "metronome_thunder": "Thunder ♪", "metronome_molasses": "Molasses ♪", "metronome_unmaking": "Unmake ♪",
+	"ram_impact": "Ram ●", "ram_grinder": "Ram ∿",
+}
+const TECH_ICON := {"steam": "⚙", "aether": "✦", "alchemy": "⚗"}
+const TECH_COLOR := {"steam": "#ff9a4a", "aether": "#ffd27a", "alchemy": "#9cff5a"}
 
 
 func _ready() -> void:
@@ -165,6 +183,10 @@ func _build_top() -> void:
 	integrity_bar.show_percentage = false
 	ib.add_child(integrity_bar)
 	res_label = _rich(hb)
+	tech_btn = Button.new()
+	tech_btn.tooltip_text = "Technologies (Y): Steamworks, Aether, Alchemy"
+	tech_btn.pressed.connect(func(): w.open_tech())
+	hb.add_child(tech_btn)
 	preview_label = _rich(hb)
 	preview_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	for s in [0.5, 1.0, 2.0, 3.0]:
@@ -236,6 +258,31 @@ func _build_left() -> void:
 	discard_btn.tooltip_text = "Throw the selected piece away (Recycler turns it into Essence)"
 	discard_btn.pressed.connect(func(): w.discard_selected())
 	vb.add_child(discard_btn)
+	_section(vb, "KIT BELT (Shift+1–6)")
+	var kg := GridContainer.new()
+	kg.columns = 3
+	vb.add_child(kg)
+	for i in Bal.KIT_BELT:
+		var b := Button.new()
+		b.custom_minimum_size = Vector2(62, 34)
+		b.add_theme_font_size_override("font_size", 12)
+		b.pressed.connect(func(): w.select_kit(i))
+		kg.add_child(b)
+		kit_slots.append(b)
+	armory_btn = Button.new()
+	armory_btn.text = "Armory (K)"
+	armory_btn.pressed.connect(func(): w.open_armory())
+	vb.add_child(armory_btn)
+	var sh := HBoxContainer.new()
+	vb.add_child(sh)
+	orbital_btn = Button.new()
+	orbital_btn.text = "Orbital (O)"
+	orbital_btn.pressed.connect(func(): w.begin_strike("orbital"))
+	sh.add_child(orbital_btn)
+	air_btn = Button.new()
+	air_btn.text = "Air (X)"
+	air_btn.pressed.connect(func(): w.begin_strike("airstrike"))
+	sh.add_child(air_btn)
 
 
 func _build_card() -> void:
@@ -248,6 +295,20 @@ func _build_card() -> void:
 	var vb := VBoxContainer.new()
 	card.add_child(vb)
 	card_text = _rich(vb, 296)
+	card_btns = HBoxContainer.new()
+	vb.add_child(card_btns)
+	prio_btn = Button.new()
+	prio_btn.tooltip_text = "Targeting priority (T cycles)"
+	prio_btn.pressed.connect(func(): w.cycle_priority())
+	card_btns.add_child(prio_btn)
+	setall_btn = Button.new()
+	setall_btn.text = "Set all"
+	setall_btn.pressed.connect(func(): w.set_all_priority())
+	card_btns.add_child(setall_btn)
+	evolve_btn = Button.new()
+	evolve_btn.text = "Evolve (U)"
+	evolve_btn.pressed.connect(func(): w.open_evolve())
+	card_btns.add_child(evolve_btn)
 	card.visible = false
 
 
@@ -283,6 +344,10 @@ func _build_bottom() -> void:
 
 # ----------------------------------------------------------------- per-frame update
 func refresh(g: Game) -> void:
+	var vs := get_viewport_rect().size
+	if size != vs:
+		position = Vector2.ZERO
+		size = vs
 	if g == null:
 		return
 	var wave_txt := "Board %d · Wave %d of %d" % [g.board_no, maxi(g.wave_index, 1 if g.phase == "wave" else g.wave_index), g.waves_in_board()]
@@ -296,6 +361,23 @@ func refresh(g: Game) -> void:
 	var pearls := "   [color=#e8f4ff]● %d[/color]" % g.base.pearls if g.base.pearls > 0 else ""
 	res_label.text = "[color=#ffcf6b]◆ %d[/color]   [color=#f08c40]⬢ %d[/color]   [color=#e0b060]▮ %d[/color]   [color=#8cd8ff]≈ %d[/color]%s%s   [color=#8a93a6]%d/%d%s[/color]" % [int(g.base.essence), int(g.base.ore), int(g.base.timber), int(g.base.water), pearls, lance, maxi(0, g.integrity), Bal.BASE_INTEGRITY, buf]
 	res_label.tooltip_text = "Essence, Ore, Timber, Water, Pearls, Lance charges, base integrity"
+	var tparts: PackedStringArray = []
+	for k in Bal.TECHS:
+		tparts.append("%s %d" % [TECH_ICON[k], g.tech_level(k)])
+	tech_btn.text = "  ".join(tparts) + ("  ★" if g.base.freeTech else "")
+	var ksig := "%s|%d|%s|%s" % [str(g.arsenal.belt), w.kit_slot, g.can_orbital(), g.can_airstrike()]
+	if ksig != _kit_sig:
+		_kit_sig = ksig
+		for i in kit_slots.size():
+			var id: String = g.arsenal.belt[i]
+			kit_slots[i].text = KIT_SHORT.get(id, "–") if id != "" else "–"
+			kit_slots[i].disabled = id == ""
+			kit_slots[i].tooltip_text = ("%s: %s" % [Bal.KITS[id].name, Bal.KITS[id].note]) if id != "" else "Empty: buy kits in the Armory (K)"
+			kit_slots[i].modulate = Color(1.25, 1.1, 0.85) if w.kit_slot == i else Color.WHITE
+		orbital_btn.visible = not g.arsenal.orbital_pad().is_empty()
+		orbital_btn.disabled = not g.can_orbital()
+		air_btn.visible = not g.arsenal.airstrike_pad().is_empty()
+		air_btn.disabled = not g.can_airstrike()
 	var nw := g.next_wave_preview()
 	if g.phase == "calm" and not nw.is_empty():
 		var counts := {}
@@ -399,6 +481,7 @@ func show_tower(t: SimTower, g: Game) -> void:
 	if t == null or t.stats.is_empty():
 		if t != null and t.type == "":
 			card.visible = true
+			card_btns.visible = false
 			card_text.text = "[b]Unfinished pile[/b]\n[color=#8a93a6]%d of 3 core pieces. Add touching pieces to make a tower.[/color]" % t.core_count()
 			return
 		card.visible = false
@@ -408,8 +491,18 @@ func show_tower(t: SimTower, g: Game) -> void:
 	var def: Dictionary = Bal.TOWERS[t.type]
 	var col: String = s.color
 	var lines: PackedStringArray = []
-	lines.append("[font_size=20][b]%s[/b][/font_size]  [color=#8a93a6]Mk I[/color]" % t.type)
+	var bd := Evolve.branch_def(t)
+	var mk: String = ["I", "II", "III", "IV"][t.mark - 1]
+	var name_txt: String = bd.name if (t.mark >= 3 and not bd.is_empty()) else t.type
+	var badge := ""
+	if t.tech != "":
+		badge = "  [color=%s]%s %s[/color]" % [TECH_COLOR[t.tech], TECH_ICON[t.tech], Bal.TECH_NAME[t.tech]]
+	lines.append("[font_size=20][b]%s[/b][/font_size]  [color=#ffcf6b]Mk %s[/color]%s" % [name_txt, mk, badge])
+	if t.mark >= 3 and not bd.is_empty():
+		lines.append("[color=#ffd9a0]%s[/color]" % bd.tags)
 	lines.append("[color=#8a93a6]%s · %s[/color]" % [def.note, t.hint])
+	if t.aura_mult > 1.001:
+		lines.append("[color=#ffd27a]Linked / amplified: +%d%% damage[/color]" % roundi((t.aura_mult - 1.0) * 100.0))
 	lines.append("")
 	lines.append("Damage [b]%.0f[/b] every %.2f s  ·  DPS [b]%.0f[/b]" % [s.damage, s.interval, s.dps])
 	lines.append("Range [b]%.1f[/b] cells  ·  Stories [b]%d[/b]  ·  Kills [b]%d[/b]" % [s.range, s.stories, t.kills])
@@ -424,6 +517,11 @@ func show_tower(t: SimTower, g: Game) -> void:
 	if t.corroded:
 		lines.append("[color=#b6ff5c]Corroded: firing at 70%[/color]")
 	card_text.text = "\n".join(lines)
+	card_btns.visible = true
+	prio_btn.text = "◎ " + Bal.PRIORITY_LABEL.get(t.priority, "First")
+	setall_btn.tooltip_text = "Set every %s to %s" % [t.type, Bal.PRIORITY_LABEL.get(t.priority, "First")]
+	evolve_btn.disabled = t.mark >= 4
+	evolve_btn.text = "Evolve (U)" if t.mark < 4 else "Mk IV"
 
 
 func hide_card() -> void:

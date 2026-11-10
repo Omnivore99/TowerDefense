@@ -17,6 +17,7 @@ var forests: Array = []  ## {id, cells: Array[int], max, regrow}
 var lakes: Array = []  ## {id, cells: Array[int], units, max, dry_t}
 var pimples: Array = []  ## {id, cell, harvester, node, M, T, age, pearl}
 var craters: Array = []  ## {cell, cool} (cool = waves before it can sprout again)
+var scorched: Array = []  ## {x, y, r, t} orbital scorch marks (cosmetic, stay for the run)
 var version := 0  ## bumps whenever trees, water or pimples change (views rebuild)
 var ground_version := 0  ## bumps when the ground itself changes (lakes drain or dry)
 var pimple_income := 0.0
@@ -361,6 +362,7 @@ func _grow_pimples(rng: Rng) -> void:
 	pimples = keep
 	for c in craters:
 		c.cool -= 1
+	craters = craters.filter(func(c): return not (c.get("scorch", false) and c.cool <= 0))
 	for h in g.harvesters:
 		h.age = int(h.get("age", 0)) + 1
 		if h.age % Bal.PIMPLE.every != 0:
@@ -411,6 +413,16 @@ func _free_neighbours(cells: Array) -> Array:
 
 func _crater(cell: int) -> void:
 	craters.append({"cell": cell, "cool": Bal.PIMPLE.craterCool})
+	version += 1
+
+
+## Orbital scorch: cells in radius cannot sprout pimples for craterCool waves; the mark stays.
+func scorch(x: float, y: float, r: float) -> void:
+	scorched.append({"x": x, "y": y, "r": r, "t": g.time})
+	for yy in range(floori(y - r), ceili(y + r)):
+		for xx in range(floori(x - r), ceili(x + r)):
+			if Board.in_grid(xx, yy) and Vector2(xx + 0.5 - x, yy + 0.5 - y).length() <= r:
+				craters.append({"cell": Board.cell_idx(xx, yy), "cool": Bal.PIMPLE.craterCool, "scorch": true})
 	version += 1
 
 
@@ -506,6 +518,7 @@ func serialize() -> Dictionary:
 	return {
 		"tree": Array(tree), "forest_of": Array(forest_of), "lake_of": Array(lake_of), "water": Array(water),
 		"forests": forests.duplicate(true), "lakes": lakes.duplicate(true), "pimples": pimples.duplicate(true), "craters": craters.duplicate(true),
+		"scorched": scorched.duplicate(true),
 	}
 
 
@@ -520,4 +533,5 @@ func load_data(d: Dictionary) -> void:
 	lakes = d.lakes.duplicate(true)
 	pimples = d.pimples.duplicate(true)
 	craters = d.craters.duplicate(true)
+	scorched = d.get("scorched", []).duplicate(true)
 	version += 1

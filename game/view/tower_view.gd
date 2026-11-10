@@ -27,6 +27,12 @@ var drop: Node3D
 var drop_t := 9.0
 var drop_base := Vector3.ZERO
 var prev_count := -1
+var built_mark := 1
+## Evolving plays a scaffold-up, hammering and pop animation (1.618 s).
+var scaffold: Node3D
+var evo_anim := 9.0
+var evo_rings: Array[Node3D] = []
+var hammer_cb: Callable
 
 
 func setup(t: SimTower, tv: TerrainView) -> void:
@@ -37,7 +43,7 @@ func setup(t: SimTower, tv: TerrainView) -> void:
 
 
 func needs_rebuild() -> bool:
-	return tower.pieces.size() != piece_count or tower.type != built_type
+	return tower.pieces.size() != piece_count or tower.type != built_type or tower.mark != built_mark
 
 
 func rebuild() -> void:
@@ -51,6 +57,10 @@ func rebuild() -> void:
 	piece_count = tower.pieces.size()
 	drop = null
 	built_type = tower.type
+	var evolved := tower.mark > built_mark and built_mark >= 1 and piece_count == tower.pieces.size()
+	built_mark = tower.mark
+	evo_rings.clear()
+	scaffold = null
 	var t := tower
 	base_y = t.height * Kit.LH
 	var color_id: String = t.stats.get("color", "") if not t.stats.is_empty() else ""
@@ -134,10 +144,11 @@ func rebuild() -> void:
 	if stories >= 3:
 		Kit.dome(body, rt * 0.55, drum_h, glow_color.lerp(Color(1, 0.65, 0.25), 0.5))
 	var crown := stories >= 5
-	if crown:
-		Kit.crenellations(body, rt, drum_h, 10)
+	if crown or t.mark >= 2:
+		Kit.crenellations(body, rt, drum_h, 10 if crown else 8)
+	_evo_parts(t, rt, drum_h)
 	# weapon module on top (on the dome for 3+ stories, so it rises with the tower)
-	var s := 0.95 + 0.05 * (mass - 3) + 0.06 * stories
+	var s := (0.95 + 0.05 * (mass - 3) + 0.06 * stories) * (1.0 + 0.1 * (t.mark - 1))
 	var w := Weapons.build(t.type, body, glow_color, s)
 	head = w.head
 	head.position = Vector3(0, drum_h + (rt * 0.3 if stories >= 3 else 0.0), 0)
@@ -156,9 +167,66 @@ func rebuild() -> void:
 	flash_light.shadow_enabled = false
 	body.add_child(flash_light)
 	head.rotation.y = yaw
+	if t.mark >= 4:
+		body.scale = Vector3.ONE * 1.15
 	if built_stories >= 0 and built_stories != stories:
 		activate_anim = 0.3
 	built_stories = stories
+	if evolved:
+		_start_scaffold(rt, drum_h)
+
+
+## Mk II lanterns, Mk III technology module, Mk IV rings of light (section 9.5, ref 4).
+func _evo_parts(t: SimTower, rt: float, drum_h: float) -> void:
+	if t.mark >= 2:
+		for i in 4:
+			var a := PI / 4.0 + i * PI / 2.0
+			Kit.lantern(body, Vector3(cos(a) * rt * 1.05, drum_h, sin(a) * rt * 1.05), 0.3)
+	if t.mark < 3:
+		return
+	var tech := t.tech
+	match tech:
+		"steam":
+			# smoke stack, brass gears and boiler pipes
+			Kit.add(body, Kit.cylinder(0.09, 0.11, 0.9, 10), Kit.dark_iron(), Vector3(-rt * 0.75, drum_h + 0.25, -rt * 0.3))
+			Kit.add(body, Kit.torus(0.08, 0.13, 10), Kit.brass(), Vector3(-rt * 0.75, drum_h + 0.7, -rt * 0.3), Vector3(PI / 2, 0, 0))
+			for i in 2:
+				Kit.add(body, Kit.cylinder(0.16, 0.16, 0.05, 12), Kit.brass(), Vector3(rt * 0.95, 0.45 + 0.35 * i, 0), Vector3(0, 0, PI / 2))
+			Kit.pipe(body, Vector3(rt * 0.9, 0.3, rt * 0.4), Vector3(rt * 0.9, drum_h, rt * 0.4), 0.05, Kit.brass())
+		"aether":
+			# floating amber rings and lens crystals
+			for i in 2:
+				var ring := Kit.add(body, Kit.torus(rt * (1.15 + 0.15 * i), rt * (1.22 + 0.15 * i), 28), Kit.amber(3.0 + i), Vector3(0, drum_h * (0.45 + 0.3 * i), 0))
+				evo_rings.append(ring)
+			for i in 3:
+				var a := i * TAU / 3.0
+				Kit.add(body, Kit.sphere(0.08, 8), Kit.glass(Color(1.0, 0.8, 0.45)), Vector3(cos(a) * rt * 1.2, drum_h + 0.15, sin(a) * rt * 1.2))
+		"alchemy":
+			# copper vats with glowing ooze and glass pipes
+			for i in 2:
+				var a := PI * 0.25 + i * PI
+				var vp := Vector3(cos(a) * rt * 1.15, 0.0, sin(a) * rt * 1.15)
+				Kit.add(body, Kit.cylinder(0.17, 0.19, 0.42, 12), Kit.copper(), vp + Vector3(0, 0.36, 0))
+				Kit.add(body, Kit.cylinder(0.15, 0.15, 0.03, 12), Kit.glow(Color(0.55, 1.0, 0.2), 3.0), vp + Vector3(0, 0.58, 0))
+				Kit.pipe(body, vp + Vector3(0, 0.55, 0), Vector3(cos(a) * rt * 0.6, drum_h - 0.05, sin(a) * rt * 0.6), 0.04, Kit.glass(Color(0.5, 1.0, 0.3)))
+	if t.mark >= 4:
+		var c: Color = {"steam": Color(1.0, 0.55, 0.2), "aether": Color(1.0, 0.75, 0.35), "alchemy": Color(0.5, 1.0, 0.3)}.get(tech, glow_color)
+		for i in 3:
+			var ring := Kit.add(body, Kit.torus(rt * (1.35 + 0.12 * i), rt * (1.4 + 0.12 * i), 32), Kit.glow(c, 2.5), Vector3(0, 0.25 + drum_h * 0.28 * i, 0), Vector3.ZERO, Vector3(1, 0.4, 1))
+			evo_rings.append(ring)
+
+
+func _start_scaffold(rt: float, drum_h: float) -> void:
+	scaffold = Node3D.new()
+	body.add_child(scaffold)
+	var iron := Kit.dark_iron()
+	for i in 4:
+		var a := PI / 4.0 + i * PI / 2.0
+		var p := Vector3(cos(a) * rt * 1.45, 0, sin(a) * rt * 1.45)
+		Kit.add(scaffold, Kit.box(Vector3(0.05, drum_h + 0.6, 0.05)), iron, p + Vector3(0, (drum_h + 0.6) / 2.0, 0))
+	for j in 3:
+		Kit.add(scaffold, Kit.torus(rt * 1.4, rt * 1.48, 4), Kit.wood(), Vector3(0, 0.3 + j * (drum_h + 0.3) / 3.0, 0), Vector3(0, PI / 4.0, 0))
+	evo_anim = 0.0
 
 
 func play_activate() -> void:
@@ -179,6 +247,19 @@ func muzzle_world() -> Vector3:
 
 
 func _process(delta: float) -> void:
+	if evo_anim < Bal.PHI:
+		evo_anim += delta
+		if scaffold != null:
+			var k := evo_anim / Bal.PHI
+			scaffold.scale = Vector3(1, minf(1.0, k * 3.0), 1)
+			if fmod(evo_anim, 0.25) < delta and k < 0.8 and hammer_cb.is_valid():
+				hammer_cb.call(self)
+			if evo_anim >= Bal.PHI:
+				scaffold.queue_free()
+				scaffold = null
+				activate_anim = 0.45
+	for i in evo_rings.size():
+		evo_rings[i].rotation.y += delta * (0.6 + 0.3 * i) * (1 if i % 2 == 0 else -1)
 	if drop != null and drop_t < 1.0:
 		drop_t += delta
 		var fall := Bal.T_S  # 0.236 s fall

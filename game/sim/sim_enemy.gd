@@ -53,6 +53,13 @@ var radius := 0.55
 var hit_flash := 0.0
 ## Gait phase 0..1 (view uses it to drive hops and coil stretches).
 var gait := 0.0
+## v2 status: stun, vulnerability (+x damage taken), Unmaking (defences off), spike/trap bookkeeping.
+var stun_t := 0.0
+var stun_cd := 0.0
+var vuln := 0.0
+var vuln_t := 0.0
+var unmade_t := 0.0
+var tarred := 0.0
 ## Damage bookkeeping for the damage report: source key -> damage.
 var leaked := false
 

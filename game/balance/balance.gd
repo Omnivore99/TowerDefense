@@ -231,19 +231,19 @@ const BASE_START_SQUARES := 2
 const HARMONY := 0.2360679774997897
 const GOLDEN_BASE_DAMAGE := 0.08
 
-const BUILDING_IDS: Array[String] = ["lance", "blastDoor", "beacon", "powerStation", "recycler", "research", "shapeFactory", "harvesterHub", "factory", "missileBattery", "smite"]
+const BUILDING_IDS: Array[String] = ["lance", "armory", "blastDoor", "beacon", "powerStation", "recycler", "research", "shapeFactory", "harvesterHub", "factory", "missileBattery"]
 const BUILDINGS := {
 	"lance":          {"name": "Resource Lance", "size": 1, "cost": 5, "effect": "Pops pimples anywhere on the map: 2 charges per wave"},
 	"blastDoor":      {"name": "Blast Door", "size": 1, "cost": 5, "effect": "+5 base buffer per board"},
 	"beacon":         {"name": "Beacon", "size": 1, "cost": 5, "effect": "+1 MAY USE slot"},
+	"armory":         {"name": "Armory", "size": 2, "cost": 8, "effect": "Unlocks every kit in the Armory (K)"},
 	"powerStation":   {"name": "Power Station", "size": 2, "cost": 8, "effect": "+10% damage for Laser, Pulsar, Lightning, E-Field"},
 	"recycler":       {"name": "Recycler", "size": 2, "cost": 8, "effect": "Turn any piece into 2 Essence"},
-	"research":       {"name": "Research Tower", "size": 3, "cost": 13, "effect": "Every 3rd board, a rare-glyph piece"},
+	"research":       {"name": "Research Tower", "size": 3, "cost": 13, "effect": "+1 tech point per board; every 3rd board, a rare-glyph piece"},
 	"shapeFactory":   {"name": "Shape Factory", "size": 3, "cost": 21, "effect": "Once per wave, choose the next piece family"},
 	"harvesterHub":   {"name": "Harvester Hub", "size": 3, "cost": 13, "effect": "+50% ore from Harvesters"},
 	"factory":        {"name": "Factory", "size": 5, "cost": 34, "effect": "Sends a small tank down the road every 13 s"},
 	"missileBattery": {"name": "Missile Battery", "size": 5, "cost": 34, "effect": "Base Missile tower, 40-cell range from the core"},
-	"smite":          {"name": "Smite Tower", "size": 8, "cost": 55, "effect": "Orbital strike, recharges over 3 waves"},
 }
 const BUILDING_FX := {
 	"blastDoor": 5, "powerStation": 0.1, "recycler": 2.0, "harvesterHub": 0.5,
@@ -268,3 +268,132 @@ const PIECE_BODY := {
 	"blue": Color(0.2, 0.52, 0.92),
 	"green": Color(0.36, 0.78, 0.26),
 }
+
+# ================================================================ v2.0 milestone 4
+# ---------------------------------------------------------------- targeting (section 9.1)
+const PRIORITIES: Array[String] = ["first", "last", "most", "least", "fastest", "slowest", "strongest", "weakest", "specials", "air", "closest"]
+const PRIORITY_LABEL := {
+	"first": "First", "last": "Last", "most": "Most powerful", "least": "Least powerful", "fastest": "Fastest",
+	"slowest": "Slowest", "strongest": "Strongest", "weakest": "Weakest", "specials": "Specials first", "air": "Air first", "closest": "Closest",
+}
+const PRIORITY_DEFAULT := {
+	"Gun": "first", "Machine Gun": "first", "Rifle": "most", "Bomb": "first", "Missile": "air", "Laser": "strongest",
+	"Pulsar": "first", "Lightning": "first", "E-Field": "first", "Freezer": "fastest", "Flamer": "first", "Acid": "first", "Virus": "least",
+}
+## Turret turn rates (rad/s); a shot fires only when aligned within AIM_TOLERANCE.
+const TURN_RATE := {
+	"Gun": 7.0, "Machine Gun": 11.0, "Rifle": 2.6, "Bomb": 4.0, "Missile": 6.0, "Laser": 5.0, "Pulsar": 4.0,
+	"Lightning": 99.0, "E-Field": 99.0, "Freezer": 99.0, "Flamer": 6.0, "Acid": 4.0, "Virus": 6.0,
+}
+const AIM_TOLERANCE := 0.22
+const TARGET_HYSTERESIS := 1.15
+
+# ---------------------------------------------------------------- evolutions (section 9.5) [Tune]
+const TECHS: Array[String] = ["steam", "aether", "alchemy"]
+const TECH_NAME := {"steam": "Steamworks", "aether": "Aether", "alchemy": "Alchemy"}
+## Resources each technology leans on (Mk III / Mk IV costs are split 13:8 and 34:21 across them).
+const TECH_RES := {"steam": ["ore", "timber"], "aether": ["ore", "water"], "alchemy": ["water", "timber"]}
+## Points needed for each next tech level (Fibonacci): level 1 at 1 point, 2 at 3, 3 at 6, 4 at 11, 5 at 19.
+const TECH_LEVEL_POINTS: Array[int] = [1, 2, 3, 5, 8]
+const TECH_OPEN_COST := 13.0
+const EVO := {
+	"mk2": {"ore": 8.0, "timber": 5.0, "dmg": 1.3, "range": 1.1},
+	"mk3": {"split": [13.0, 8.0], "techLevel": 1, "dmg": 1.6, "range": 1.1},
+	"mk4": {"split": [34.0, 21.0], "pearls": 2, "techLevel": 3, "dmg": 1.6, "range": 1.1},
+	"sizeFactorPerPiece": 0.1,
+}
+## Tech perks: level 2 = +10% damage for that technology's towers; level 5 ultimates.
+const TECH_PERK_DMG := 0.1
+const LIGHTHOUSE_GRID := 0.15
+## Branches: two per tower. m3 / m4 are the Mk III signature and Mk IV capstone effects.
+## Keys: dmg range rate (multipliers); pierce chain salvo multi (counts); splash (radius); dot (fraction
+## of hit damage per second, 3 s); slow [mult, s]; stun (s); knock (cells); vuln (+x taken, 3 s);
+## buff (+x damage to towers within 6 cells); armor (ignore shields and armour); spread (dots spread on
+## kill); puddle (leaves a damaging puddle, radius); fire (s the puddle burns).
+const BRANCHES := {
+	"Gun": [
+		{"tech": "steam", "name": "Bastion Gun", "m3": {"rate": 1.6, "dmg": 1.1}, "m4": {"rate": 2.2, "dmg": 1.3, "splash": 1.2}, "tags": "Belt-fed · Sustained"},
+		{"tech": "aether", "name": "Lens Cannon", "m3": {"pierce": 1, "dmg": 1.3}, "m4": {"pierce": 3, "dmg": 1.6}, "tags": "Light bolts · Pierce"},
+	],
+	"Machine Gun": [
+		{"tech": "steam", "name": "Gatling Keep", "m3": {"rate": 1.5}, "m4": {"rate": 2.4}, "tags": "Spin-up · Casings"},
+		{"tech": "alchemy", "name": "Nanite Spitter", "m3": {"dot": 0.35}, "m4": {"dot": 0.5, "spread": 1}, "tags": "Infects · Stacks"},
+	],
+	"Rifle": [
+		{"tech": "steam", "name": "Siege Rifle", "m3": {"armor": 1, "dmg": 1.3}, "m4": {"armor": 1, "dmg": 1.7, "knock": 1.0}, "tags": "Armour piercing · Knockback"},
+		{"tech": "aether", "name": "Lighthouse Lance", "m3": {"pierce": 3, "dmg": 1.2}, "m4": {"pierce": 12, "dmg": 1.5}, "tags": "Rail beam · Line"},
+	],
+	"Bomb": [
+		{"tech": "steam", "name": "Steam Mortar", "m3": {"salvo": 2}, "m4": {"salvo": 4, "dmg": 1.2}, "tags": "Cluster bomblets · Area"},
+		{"tech": "alchemy", "name": "Plague Mortar", "m3": {"puddle": 2.0}, "m4": {"puddle": 2.6, "slow": [0.7, 1.0], "vuln": 0.15}, "tags": "Gas clouds · Corrode"},
+	],
+	"Missile": [
+		{"tech": "steam", "name": "Rocket Spire", "m3": {"salvo": 3}, "m4": {"salvo": 7}, "tags": "Salvos · Smoke"},
+		{"tech": "aether", "name": "Seeker Array", "m3": {"dmg": 1.3, "rate": 1.3}, "m4": {"dmg": 1.6, "rate": 1.5, "chain": 2}, "tags": "Homing · Anti-air"},
+	],
+	"Laser": [
+		{"tech": "aether", "name": "Amber Dome Emitter", "m3": {"dmg": 1.4}, "m4": {"dmg": 1.6, "multi": 2}, "tags": "Ramping beam · Split"},
+		{"tech": "steam", "name": "Furnace Lance", "m3": {"fire": 2.0}, "m4": {"fire": 5.0, "dmg": 1.3}, "tags": "Heat beam · Fire lines"},
+	],
+	"Pulsar": [
+		{"tech": "aether", "name": "Resonance Spire", "m3": {"dmg": 1.3, "range": 1.15}, "m4": {"dmg": 1.6, "stun": 0.2}, "tags": "Wide rings · Stun"},
+		{"tech": "alchemy", "name": "Spore Pulsar", "m3": {"dot": 0.3}, "m4": {"dot": 0.4, "puddle": 1.6}, "tags": "Spores · Clouds"},
+	],
+	"Lightning": [
+		{"tech": "aether", "name": "Plasma Spire", "m3": {"chain": 2}, "m4": {"chain": 4, "dmg": 1.4}, "tags": "Chain lightning · Multi-target"},
+		{"tech": "steam", "name": "Dynamo Coil", "m3": {"stun": 0.15}, "m4": {"stun": 0.3, "dmg": 1.4}, "tags": "Stun · Arcs"},
+	],
+	"E-Field": [
+		{"tech": "aether", "name": "Crystal Ward", "m3": {"buff": 0.1}, "m4": {"buff": 0.2, "dmg": 1.3}, "tags": "Support · Rune amplifier"},
+		{"tech": "alchemy", "name": "Miasma Dome", "m3": {"dot": 0.3}, "m4": {"dot": 0.4, "vuln": 0.15}, "tags": "Poison aura · Weaken"},
+	],
+	"Freezer": [
+		{"tech": "aether", "name": "Frost Lens", "m3": {"stun": 0.5}, "m4": {"stun": 0.8, "dmg": 1.3}, "tags": "Freeze · Control"},
+		{"tech": "alchemy", "name": "Cryo Cauldron", "m3": {"puddle": 1.8}, "m4": {"puddle": 2.4, "splash": 1.5}, "tags": "Slush · Shatter"},
+	],
+	"Flamer": [
+		{"tech": "steam", "name": "Boiler Furnace", "m3": {"range": 1.3, "knock": 0.3}, "m4": {"range": 1.5, "knock": 0.5, "dmg": 1.4}, "tags": "Long jet · Knockback"},
+		{"tech": "alchemy", "name": "Napalm Alembic", "m3": {"dot": 0.4}, "m4": {"dot": 0.6, "spread": 1}, "tags": "Sticky fire · Spreads"},
+	],
+	"Acid": [
+		{"tech": "alchemy", "name": "Nanite Cauldron", "m3": {"puddle": 2.6}, "m4": {"puddle": 3.2, "vuln": 0.2}, "tags": "Wide puddles · Eat armour"},
+		{"tech": "steam", "name": "Pressure Sprayer", "m3": {"range": 1.35}, "m4": {"range": 1.5, "pierce": 4}, "tags": "Pressurised jet · Line"},
+	],
+	"Virus": [
+		{"tech": "alchemy", "name": "Hive Spire", "m3": {"dot": 0.2, "spread": 1}, "m4": {"dot": 0.3, "spread": 2, "dmg": 1.4}, "tags": "Fast spread · Swarm"},
+		{"tech": "aether", "name": "Phage Beacon", "m3": {"vuln": 0.1}, "m4": {"vuln": 0.2}, "tags": "Marks · Team damage"},
+	],
+}
+
+# ---------------------------------------------------------------- kits (section 10) [Tune]
+const KIT_BELT := 6
+const KITS := {
+	"landmine": {"name": "Landmine", "cost": {"ore": 3.0}, "where": "road", "size": Vector2i(1, 1), "note": "3 x 3 blast, 55 x unit HP, one use"},
+	"spike": {"name": "Spike trap", "cost": {"timber": 5.0, "ore": 2.0}, "where": "road", "size": Vector2i(2, 2), "note": "0.5 x unit HP per crossing + bleed, 21 hits"},
+	"betty": {"name": "Bouncing Betty", "cost": {"ore": 5.0, "essence": 1.0}, "where": "road", "size": Vector2i(1, 1), "note": "hits airborne too, 2-cell burst"},
+	"claymore": {"name": "Tripwire claymore", "cost": {"ore": 5.0, "timber": 2.0}, "where": "road", "size": Vector2i(1, 1), "note": "shrapnel cone along the road, catches leapers"},
+	"tar": {"name": "Tar pit", "cost": {"timber": 5.0, "water": 5.0}, "where": "road", "size": Vector2i(2, 3), "note": "slows to 50% for the board"},
+	"metronome_decay": {"name": "Decay metronome", "cost": {"timber": 8.0, "ore": 5.0}, "where": "off", "size": Vector2i(2, 2), "note": "stacking rot per tick"},
+	"metronome_thunder": {"name": "Thunder metronome", "cost": {"timber": 8.0, "ore": 5.0}, "where": "off", "size": Vector2i(2, 2), "note": "area burst per tick"},
+	"metronome_molasses": {"name": "Molasses metronome", "cost": {"timber": 8.0, "ore": 5.0}, "where": "off", "size": Vector2i(2, 2), "note": "slows 25% per tick"},
+	"metronome_unmaking": {"name": "Unmaking metronome", "cost": {"timber": 8.0, "ore": 5.0}, "where": "off", "size": Vector2i(2, 2), "note": "strips shields and armour"},
+	"ram_impact": {"name": "Torpedo Ram (impact)", "cost": {"ore": 13.0, "timber": 8.0}, "where": "roadside", "size": Vector2i(3, 3), "note": "rolling rocket up the road, 21 x unit HP"},
+	"ram_grinder": {"name": "Torpedo Ram (grinder)", "cost": {"ore": 13.0, "timber": 8.0}, "where": "roadside", "size": Vector2i(3, 3), "note": "slithering drill through everything"},
+	"howitzer": {"name": "Howitzer", "cost": {"ore": 21.0, "essence": 13.0}, "where": "ring", "size": Vector2i(2, 2), "note": "55-cell artillery, 34 x unit HP"},
+	"airstrike": {"name": "Air-strike antenna", "cost": {"ore": 34.0, "essence": 21.0}, "where": "ring", "size": Vector2i(2, 2), "note": "A: a 3 x 13 cascade every 21 s"},
+	"orbital": {"name": "Orbital uplink", "cost": {"ore": 55.0, "essence": 34.0, "pearls": 3.0}, "where": "ring", "size": Vector2i(2, 2), "note": "O: one huge beam"},
+}
+const KIT_ORDER: Array[String] = ["landmine", "spike", "betty", "claymore", "tar", "metronome_decay", "metronome_thunder", "metronome_molasses", "metronome_unmaking", "ram_impact", "ram_grinder", "howitzer", "airstrike", "orbital"]
+const ROAD_KITS_PER_SQUARE := 2
+const TRAP := {
+	"landmineUnits": 55.0, "landmineR": 1.6, "spikeUnits": 0.5, "spikeHits": 21, "bettyUnits": 21.0, "bettyR": 2.0,
+	"claymoreUnits": 21.0, "claymoreLen": 5.0, "tarSlow": 0.5,
+}
+const METRONOME := {"tick": 0.618, "decay": 0.928, "stop": 0.1, "shove": 0.4, "timedShove": 0.7, "window": 0.146, "max": 1.272, "radius": 5.0,
+	"rotFrac": 0.02, "rotT": 3.0, "rotStacks": 5, "thunderUnits": 0.6, "molasses": 0.75, "molassesT": 1.236, "unmakeShield": 0.25}
+const RAM := {"speed": 9.0, "impactUnits": 21.0, "impactR": 3.0, "impactReload": 8.0, "grinderUnits": 3.0, "grinderReload": 10.0, "reach": 34.0}
+const HOWITZER := {"range": 55.0, "minRange": 8.0, "reload": 6.5, "units": 34.0, "radius": 3.0, "flight": 2.5, "max": 3}
+const AIRSTRIKE := {"every": 21.0, "radius": 40.0, "len": 13, "width": 3, "units": 5.0}
+const ORBITAL := {"recharge": 55.0, "units": 55.0, "ringUnits": 21.0, "r0": 2.0, "r1": 8.0, "delay": 0.618}
+## Base ring: kit pads in a ring around the core (section 13).
+const RING := {"inner": 4.5, "outer": 9.5}
