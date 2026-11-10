@@ -602,7 +602,7 @@ func _handle_events(evs: Array) -> void:
 				if e.get("crit", false):
 					fx.burst(_w(e.x, e.y, 0.8), 8, 4.0, Color(1, 0.95, 0.6), 0.08, 0.35)
 			"spawn":
-				pass
+				_special_popup(e.id)
 			"kill":
 				_on_kill(e)
 			"combo":
@@ -822,6 +822,7 @@ func _handle_events(evs: Array) -> void:
 				fx.ribbon(_w(e.x, e.y, 0.7), _w(e.x2, e.y2, 1.2), 0.1, Color(0.8, 0.9, 1.0), 0.3, true, 4)
 				fx.ring(_w(e.x2, e.y2, 1.2), 0.2, 1.0, 0.3, Color(0.8, 0.9, 1.0, 0.8))
 			"cardDraw":
+				_tip_once("cards", "Card draw! The backs show each card's category. Turn over 1 card for ×4, 2 cards for ×2 each or 3 cards for ×1 each: one is a focused gamble, three is safe and broad.", 20.0)
 				if playing and demo_bot == null:
 					call_deferred("open_draw")
 			"cardsTaken":
@@ -835,6 +836,8 @@ func _handle_events(evs: Array) -> void:
 				fx.burst(_w(e.x, e.y, 1.5), 16, 3.0, Color(0.6, 0.8, 1.0), 0.07, 0.6)
 				sfx.play("bell")
 			"waveStart":
+				if g.is_deploy_round():
+					_tip_once("deploy", "Deployment round: no pieces this wave. Pick a unit (N), click the road to drop it, Tab switches Hold / Advance. Press V to watch with the spectator camera; the damage report follows.", 20.0)
 				hud.toast("Wave %d" % e.index, Color(1, 0.8, 0.45), 1.6)
 				sfx.play("wave", -4.0)
 				sfx.set_wave(true)
@@ -1124,6 +1127,11 @@ func _on_phase(p: String) -> void:
 				call_deferred("open_report")
 			if g.wave_index == 0:
 				hud.toast("Board %d" % g.board_no, Color(1, 0.82, 0.45), 2.0)
+				match g.board_no:
+					2:
+						_tip_once("board2", "New: drop a piece on a forest (lumber camp), lake shore (pump) or ore vein to harvest. Build the Resource Lance at the base to pop ripe pimples. Your first Town Charter is in MAY USE: found a town near the road.", 24.0)
+					3:
+						_tip_once("board3", "Metronomes: buy one in the Armory (K), set it by the road and click it (or press G) to shove it. A shove right as it ticks overdrives it.", 20.0)
 				if g.base.freeTech and playing:
 					open_tech()
 		"cleared":
@@ -2339,6 +2347,43 @@ func _settings_screen(from_title: bool) -> void:
 # ------------------------------------------------------------------ card draws (section 14)
 const CAT_COLOR := {"colour": "#ff9a6a", "attachment": "#8cc8ff", "modifier": "#ffd27a", "gambit": "#d08cff"}
 var draw_picks: Array = []
+
+
+func _tip_once(key: String, txt: String, secs: float = 14.0) -> void:
+	if demo_bot != null:
+		return
+	var seen: Array = meta.get("tips", [])
+	if seen.has(key):
+		return
+	seen.append(key)
+	meta["tips"] = seen
+	SaveIO.save_meta(meta)
+	hud.tip(txt, secs)
+
+
+const SPECIAL_TIP := {
+	"raider": "Raider: always heads for a town if one is reachable. Walls and a garrison stop it.",
+	"leaper": "Leaper: jumps over traps and mines it can see. Bouncing Betty and tall towers (story 3+) catch it.",
+	"sapper": "Sapper: leaves the road to spoil a pimple or stop a harvester. Cover your economy.",
+	"mirror": "Mirror shell: reflects the first beam as a 1 s stun on the tower. Use ballistic towers.",
+	"burrower": "Burrower: dives underground 2 s in every 6. Only traps, mines, Bomb towers and artillery reach it then.",
+	"cloaked": "Cloaked: invisible to towers beyond 8 cells. Short-range towers or a Spotter Mast find it.",
+}
+
+
+## Bestiary popup the first time each special appears (section 18).
+func _special_popup(id: int) -> void:
+	var en := g._enemy_by_id(id)
+	if en == null or en.special == "":
+		return
+	var seen: Array = meta.get("specials", [])
+	if seen.has(en.special) or demo_bot != null:
+		return
+	seen.append(en.special)
+	meta["specials"] = seen
+	SaveIO.save_meta(meta)
+	hud.toast(SPECIAL_TIP.get(en.special, en.special), Color(1, 0.75, 0.45), 6.0)
+	fx.ring(_w(en.x, en.y, 0.3), 0.3, 1.8, 0.8, Color(1, 0.7, 0.3, 0.9))
 
 
 func open_draw() -> void:

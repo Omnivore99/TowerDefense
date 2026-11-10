@@ -70,6 +70,25 @@ jobs:
           mkdir -p game/build/web
           godot --headless --path game --export-release "Web" build/web/index.html
           test -f game/build/web/index.html
+      - name: Export desktop builds (Linux, Windows, macOS)
+        run: |
+          mkdir -p game/build/linux game/build/windows game/build/macos
+          godot --headless --path game --export-release "Linux" build/linux/SatisfyingTD.x86_64
+          godot --headless --path game --export-release "Windows" build/windows/SatisfyingTD.exe
+          godot --headless --path game --export-release "macOS" build/macos/SatisfyingTD.zip || echo "macOS export skipped"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SatisfyingTD-linux
+          path: game/build/linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SatisfyingTD-windows
+          path: game/build/windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SatisfyingTD-macos
+          path: game/build/macos
+          if-no-files-found: ignore
 
       - name: Assemble site
         run: |

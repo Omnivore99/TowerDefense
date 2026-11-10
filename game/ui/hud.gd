@@ -47,6 +47,14 @@ var _kit_sig := ""
 var unit_box: HFlowContainer
 var unit_title: Label
 var _unit_sig := ""
+## Onboarding tips after board 1 (section 18): text and seconds left.
+var tip_text := ""
+var tip_t := 0.0
+
+
+func tip(txt: String, secs: float = 14.0) -> void:
+	tip_text = txt
+	tip_t = secs
 const KIT_SHORT := {
 	"landmine": "Mine", "spike": "Spikes", "betty": "Betty", "claymore": "Claymore", "tar": "Tar pit",
 	"metronome_decay": "Decay ♪", "metronome_thunder": "Thunder ♪", "metronome_molasses": "Molasses ♪", "metronome_unmaking": "Unmake ♪",
@@ -450,6 +458,10 @@ func refresh(g: Game) -> void:
 	if not g.tutorial.is_empty():
 		tutorial_panel.visible = true
 		tutorial_text.text = "[color=#ffcf6b]Tip[/color]  " + g.tutorial.text
+	elif tip_t > 0.0:
+		tip_t -= get_process_delta_time()
+		tutorial_panel.visible = true
+		tutorial_text.text = "[color=#ffcf6b]Tip[/color]  " + tip_text
 	else:
 		tutorial_panel.visible = false
 	if combo_label.modulate.a > 0.0:

@@ -215,7 +215,7 @@ const PACK_SPACING := {"mite": 0.07, "small": 0.14, "medium": 0.2, "large": 0.26
 const PIECES_PER_WAVE_CYCLE := 9.5
 const HP_ALPHA := 1.3
 ## H_B per board on Normal. [Tune] Recalibrate with the harness for v2.0 (section 8.5).
-const H_B: Array[float] = [420.0, 1300.0, 430.0, 560.0, 640.0, 600.0, 660.0]
+const H_B: Array[float] = [465.0, 1815.0, 324.0, 2087.0, 4860.0, 4009.0, 2849.0]
 const TENSION := {"start": 0.72, "end": 1.0, "spike": 1.12, "exhale": 0.9, "spikes": [2, 3, 5, 8], "single": [0.75, 0.9]}
 const DOMINANT_SHARE := 0.5
 

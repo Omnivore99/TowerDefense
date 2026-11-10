@@ -353,3 +353,13 @@ static func _test_cards() -> void:
 	check(t2 != null and t2.attach.size() == t.attach.size(), "attachments survive a save")
 	# draws come every 4th wave
 	check(cd.want_draw(4, false) and not cd.want_draw(5, false) and cd.want_draw(5, true), "draw after every 4th wave and each board clear")
+	# Bramble roots obey the stun cooldown (a fast green tower must not root a monster forever)
+	cd.fx["bramble"] = 4.0
+	t.stats["cardColour"] = "green"
+	var e := SimEnemy.new()
+	e.alive = true
+	g._card_on_hit(e, t, 1.0, {})
+	var first := e.stun_t
+	e.stun_t = 0.0
+	g._card_on_hit(e, t, 1.0, {})
+	check(first > 0.0 and e.stun_t == 0.0, "Bramble roots respect the stun cooldown")

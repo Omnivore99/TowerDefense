@@ -22,6 +22,8 @@ var version := 0  ## bumps whenever trees, water or pimples change (views rebuil
 var ground_version := 0  ## bumps when the ground itself changes (lakes drain or dry)
 var pimple_income := 0.0
 var other_income := 0.0
+## Onboarding (section 18): the next pimple sprouts at once and ripens on the next wave.
+var tutorial_pimple := false
 
 
 func _init(game) -> void:
@@ -368,7 +370,7 @@ func _grow_pimples(rng: Rng) -> void:
 	craters = craters.filter(func(c): return not (c.get("scorch", false) and c.cool <= 0))
 	for h in g.harvesters:
 		h.age = int(h.get("age", 0)) + 1
-		if h.age % Bal.PIMPLE.every != 0:
+		if h.age % Bal.PIMPLE.every != 0 and not tutorial_pimple:
 			continue
 		var alive := 0
 		for p in pimples:
@@ -382,6 +384,9 @@ func _grow_pimples(rng: Rng) -> void:
 		var cell: int = rng.pick(spots)
 		var p2 := {"id": g.next_id, "cell": cell, "harvester": h.id, "node": h.node, "M": rng.pick([2, 3, 4, 5]), "T": rng.pick([1, 2, 3]), "age": 0, "pearl": rng.chance(Bal.PIMPLE.pearlChance)}
 		g.next_id += 1
+		if tutorial_pimple:
+			p2.M = 1
+			tutorial_pimple = false
 		pimples.append(p2)
 		g.events.append({"t": "pimpleSprout", "cell": cell, "id": p2.id})
 	version += 1

@@ -410,6 +410,12 @@ func _finish_reveal() -> void:
 			add_piece(stream.make(r.pick(["T", "I", "O", "L"]), r.pick(["red", "gold", "green", "blue"]), r.pick(Pieces.RARE_GLYPHS)), true)
 			if building_mult("research") > 1.0:
 				add_piece(stream.make(r.pick(["c1", "c2", "c3"]), "gold", r.pick(Pieces.COMMON_GLYPHS)), true)
+	# onboarding (section 18): a free metronome on board 3, a pimple that ripens next wave on board 2
+	if tutorial_enabled and board_no == 3 and arsenal.belt.find("") >= 0 and not arsenal.belt.has("metronome_thunder"):
+		arsenal.belt[arsenal.belt.find("")] = "metronome_thunder"
+		events.append({"t": "kitBought", "kind": "metronome_thunder", "free": true})
+	if tutorial_enabled and board_no == 2:
+		eco.tutorial_pimple = true
 	if board_no >= 2 and not base.charterGiven:
 		base.charterGiven = true
 		add_piece(stream.make("charter", "gold"), true)
@@ -1895,7 +1901,7 @@ func _source_name(key: String, t: SimTower) -> String:
 func _card_on_hit(e: SimEnemy, t: SimTower, dmg: float, o: Dictionary) -> void:
 	var col: String = t.stats.get("cardColour", "")
 	if col == "green" and cards.f("bramble") > 0.0 and not e.boss and not e.champion:
-		e.stun_t = maxf(e.stun_t, minf(0.6, 0.15 * cards.f("bramble")))
+		_stun(e, minf(0.6, 0.15 * cards.f("bramble")))
 	if col == "blue" and cards.f("tidal") > 0.0 and o.get("single", false):
 		var r: float = 0.5 * cards.f("tidal")
 		for o2 in enemies:
