@@ -79,6 +79,11 @@ var kit_rot := 0
 ## Strike targeting: "" | "orbital" | "airstrike"; air strikes are aimed by dragging.
 var strike_mode := ""
 var strike_press: Variant = null
+## Towns and units (M5): view, unit in hand (pool index, -1 = none) and its order.
+var settle_view: SettleView
+var unit_slot := -1
+var unit_order := "hold"
+var report_due := false
 ## Demo / screenshot mode (user args): --demo [--warp B,W,S] [--cam x,z,dist,yaw] [--shot path.png]
 var demo_bot: Bot
 var shot_path := ""
@@ -197,6 +202,16 @@ func _start_demo(args: PackedStringArray) -> void:
 		cam_rig.target = Vector3(m0.x, 0, m0.y)
 		cam_rig.dist_goal = float(_arg(args, "--dist", "18"))
 		cam_rig.dist = cam_rig.dist_goal
+	elif cam == "town" and not g.towns.list.is_empty():
+		var tw0: Dictionary = g.towns.list[0]
+		cam_rig.target = Vector3(tw0.x, 0, tw0.y)
+		cam_rig.dist_goal = float(_arg(args, "--dist", "20"))
+		cam_rig.dist = cam_rig.dist_goal
+	elif cam == "units" and not g.deploy.units.is_empty():
+		var u0: Dictionary = g.deploy.units[0]
+		cam_rig.target = Vector3(u0.x, 0, u0.y)
+		cam_rig.dist_goal = float(_arg(args, "--dist", "16"))
+		cam_rig.dist = cam_rig.dist_goal
 	elif cam == "tower" and selected_tower != 0:
 		var st := g.tower_by_id(selected_tower)
 		cam_rig.target = Vector3(st.cx, 0, st.cy)
@@ -207,7 +222,7 @@ func _start_demo(args: PackedStringArray) -> void:
 		cam_rig.target = Vector3(e0.x, 0, e0.y)
 		cam_rig.dist_goal = float(cam.split(",")[1]) if cam.contains(",") else 24.0
 		cam_rig.dist = cam_rig.dist_goal
-	elif cam != "" and cam != "tower" and cam != "kit" and not cam.begins_with("enemy"):
+	elif cam != "" and not cam in ["tower", "kit", "town", "units"] and not cam.begins_with("enemy"):
 		var c := cam.split(",")
 		cam_rig.target = Vector3(float(c[0]), 0, float(c[1]))
 		cam_rig.dist_goal = float(c[2])
@@ -264,6 +279,10 @@ func _showcase() -> void:
 				break
 		if not done:
 			continue
+	var picks := ["granary", "walls", "market", "barracks", ""]
+	for tw in g.towns.list:
+		while tw.level < 5 and g.level_town(tw.id, picks[tw.level - 1]) == "":
+			pass
 	for e in g.drain_events():
 		pass
 	for t in g.towers:
@@ -406,6 +425,13 @@ func _new_game(seed_value: int, mode: String, snapshot: Dictionary, tutorial: bo
 		add_child(arsenal_view)
 		arsenal_view.setup(self)
 	arsenal_view.clear_all()
+	if settle_view == null:
+		settle_view = SettleView.new()
+		settle_view.name = "Settlements"
+		add_child(settle_view)
+		settle_view.setup(self)
+	settle_view.clear_all()
+	unit_slot = -1
 	kit_slot = -1
 	strike_mode = ""
 	last_revealed = 0
@@ -448,6 +474,8 @@ func _resync_all() -> void:
 	puddle_views.clear()
 	if arsenal_view != null:
 		arsenal_view.clear_all()
+	if settle_view != null:
+		settle_view.clear_all()
 	for t in g.towers:
 		_tower_view(t)
 
@@ -492,6 +520,7 @@ func _process(delta: float) -> void:
 	_sync_misc(delta)
 	eco_view.sync(delta)
 	arsenal_view.sync(delta)
+	settle_view.sync(delta)
 	if core != null:
 		core.get_node("Heart").scale = Vector3.ONE * (1.0 + 0.06 * sin(Time.get_ticks_msec() * 0.003))
 		core_ring.rotation.z += delta * 0.6
@@ -706,6 +735,78 @@ func _handle_events(evs: Array) -> void:
 				cam_rig.add_shake(0.3)
 			"phase":
 				_on_phase(e.phase)
+			"crate":
+				_on_crate(e)
+			"unitDeployed":
+				var up := _w(e.x, e.y, 0.2)
+				fx.burst(up, 10, 2.0, Color(0.85, 0.8, 0.6), 0.07, 0.4, "debris", 6.0)
+				sfx.play_at("place", up, -4.0)
+			"unitLost":
+				fx.burst(_w(e.x, e.y, 0.4), 12, 3.0, Color(1, 0.6, 0.3), 0.08, 0.5)
+				hud.toast("%s lost" % Bal.UNITS[e.kind].name, Color(1, 0.6, 0.5), 1.4)
+			"unitHome":
+				fx.ring(_w(e.x, e.y, 1.6), 0.2, 1.0, 0.4, Color(0.5, 0.8, 1.0, 0.6))
+			"crush":
+				fx.burst(_w(e.x, e.y, 0.2), 8, 2.0, Color(0.6, 0.9, 0.4), 0.07, 0.4, "glob", 6.0)
+			"repair":
+				fx.burst(_w(e.x, e.y, 0.8), 3, 1.5, Color(0.6, 1.0, 0.7), 0.05, 0.4)
+			"execute", "neutralise":
+				var ex := _w(e.x, e.y, 0.6)
+				fx.ribbon(_w(e.x1, e.y1, 0.6), ex, 0.05, Color(0.3, 1.0, 0.7), 0.25, true, 3)
+				fx.ring(ex, 0.2, 1.2, 0.35, Color(0.3, 1.0, 0.7, 0.8))
+				if e.t == "execute":
+					sfx.play_at("rifle", ex)
+			"salute":
+				hud.toast("%d unit%s without housing disbanded with a salute" % [e.n, "" if e.n == 1 else "s"], Color(0.85, 0.8, 0.7), 2.4)
+			"garrisonLost":
+				hud.toast("The garrison was lost: %d units" % e.n, Color(1, 0.55, 0.45), 2.2)
+			"charter":
+				hud.toast("Town Charter in MAY USE: found a town near a road (between waves)", Color(1, 0.85, 0.5), 3.2)
+				sfx.play("bell")
+			"townFounded":
+				var tp0 := _w(e.x, e.y, 0.5)
+				var path: Array = e.spur
+				for i in path.size() - 1:
+					var a := Board.macro_centre(path[i])
+					var b2 := Board.macro_centre(path[i + 1])
+					fx.ribbon(_w(a.x, a.y, 4.0), _w(b2.x, b2.y, 0.3), 0.18, Color(0.75, 0.85, 1.0), 0.5, true, 9)
+				fx.explosion(tp0, 3.0, Color(1, 0.85, 0.5))
+				cam_rig.add_shake(0.35)
+				sfx.play("thunder")
+				hud.toast("A town is founded. Monsters may wander down the new spur road.", Color(1, 0.85, 0.5), 3.0)
+			"townLevel":
+				fx.burst(_w(e.x, e.y, 2.0), 24, 4.0, Color(1, 0.85, 0.45), 0.09, 0.8)
+				sfx.play("bell")
+				hud.toast("%s%s" % [Bal.TOWN_LEVELS[e.level - 1], (": new %s" % Bal.DISTRICTS[e.district].name) if e.district != "" else ""], Color(1, 0.85, 0.5), 2.0)
+			"townHit":
+				fx.burst(_w(e.x, e.y, 0.8), 6, 2.5, Color(1, 0.45, 0.3), 0.07, 0.4)
+				sfx.play_at("leak", _w(e.x, e.y, 0.5), -8.0)
+			"townFell":
+				fx.explosion(_w(e.x, e.y, 0.8), 4.0, Color(1, 0.45, 0.25))
+				cam_rig.add_shake(0.6)
+				sfx.play("leak")
+				hud.toast("The town has fallen! Rebuild it between waves.", Color(1, 0.5, 0.4), 3.0)
+			"townRebuilt":
+				fx.burst(_w(e.x, e.y, 1.5), 20, 3.0, Color(0.9, 0.85, 0.6), 0.09, 0.8)
+				sfx.play("bell")
+			"townHarvest":
+				var tparts: PackedStringArray = []
+				for k in ["ore", "timber", "water"]:
+					if e[k] > 0.0:
+						tparts.append("+%.1f %s" % [e[k], k])
+				hud.toast("Towns: " + ", ".join(tparts), Color(0.9, 0.8, 0.55), 1.8)
+			"leap":
+				fx.burst(_w(e.x, e.y, 0.2), 8, 2.5, Color(0.8, 0.75, 0.6), 0.06, 0.4, "debris", 8.0)
+			"burrow":
+				fx.burst(_w(e.x, e.y, 0.1), 12, 2.0, Color(0.45, 0.35, 0.25), 0.08, 0.6, "debris", 8.0)
+			"sapper":
+				hud.toast("A Sapper leaves the road for your economy!", Color(1, 0.7, 0.4), 1.6)
+			"sabotage":
+				fx.explosion(_w(e.x, e.y, 0.4), 1.2, Color(1, 0.55, 0.25))
+				hud.toast("Sabotage: a %s was spoiled" % ("pimple" if e.kind == "pimple" else "harvester (no yield this wave)"), Color(1, 0.6, 0.45), 1.8)
+			"mirror":
+				fx.ribbon(_w(e.x, e.y, 0.7), _w(e.x2, e.y2, 1.2), 0.1, Color(0.8, 0.9, 1.0), 0.3, true, 4)
+				fx.ring(_w(e.x2, e.y2, 1.2), 0.2, 1.0, 0.3, Color(0.8, 0.9, 1.0, 0.8))
 			"waveStart":
 				hud.toast("Wave %d" % e.index, Color(1, 0.8, 0.45), 1.6)
 				sfx.play("wave", -4.0)
@@ -908,6 +1009,17 @@ func _on_shot(e: Dictionary) -> void:
 		"virus":
 			fx.ribbon(a, b, 0.06, Color(0.6, 1.0, 0.4), 0.2, true, 3)
 			fx.burst(b, 6, 1.5, Color(0.6, 1.0, 0.4), 0.07, 0.4, "glob", 1.0)
+		"unit_rifles", "unit_commando":
+			fx.burst(a, 2, 1.5, Color(1, 0.85, 0.5), 0.04, 0.06)
+			fx.ribbon(a, b, 0.025, Color(1, 0.9, 0.6), 0.06)
+			sfx.play_at("rifle", a, -12.0)
+		"unit_tank":
+			fx.smoke(a, 2, Color(0.6, 0.6, 0.62, 0.5), 0.2, 0.6, 0.4)
+			fx.ribbon(a, b, 0.06, Color(1, 0.8, 0.4), 0.1)
+			fx.explosion(b, 1.2, Color(1, 0.6, 0.3))
+			sfx.play_at("gun", a, -4.0)
+		"unit_drones":
+			fx.ribbon(a, b, 0.04, Color(0.5, 0.8, 1.0), 0.08, true, 2)
 		"ricochet", "tank":
 			fx.ribbon(a if e.kind == "tank" else _w(e.x1, e.y1, 0.6), b, 0.05, Color(1, 0.85, 0.4), 0.1)
 		_:
@@ -980,6 +1092,9 @@ func _on_phase(p: String) -> void:
 		return
 	match p:
 		"calm":
+			if report_due and playing:
+				report_due = false
+				call_deferred("open_report")
 			if g.wave_index == 0:
 				hud.toast("Board %d" % g.board_no, Color(1, 0.82, 0.45), 2.0)
 				if g.base.freeTech and playing:
@@ -1270,6 +1385,9 @@ func _cur_piece() -> Variant:
 
 
 func _update_ghost() -> void:
+	if unit_slot >= 0:
+		_update_unit_ghost()
+		return
 	if kit_slot >= 0 or strike_mode != "":
 		_update_kit_ghost()
 		return
@@ -1311,6 +1429,9 @@ func _update_ghost() -> void:
 				var t := g.tower_by_id(tid)
 				if t != null:
 					top += g.level_at(t, c.x, c.y) * Kit.BLOCK_H
+		if Pieces.is_charter(p):
+			Kit.add(ghost, Kit.box(Vector3(0.96, 0.08, 0.96)), mat if not ok else Kit.ghost_mat(true), Vector3(c.x + 0.5, top + 0.05, c.y + 0.5))
+			continue
 		Kit.add(ghost, Kit.bevel_box(Vector3(0.94, Kit.BLOCK_H, 0.94), 0.05), mat if not ok else body, Vector3(c.x + 0.5, top + Kit.BLOCK_H * 0.5 + 0.02, c.y + 0.5))
 		if ok:
 			var gm := Kit.add(ghost, Kit.box(Vector3(0.98, 0.03, 0.98)), Kit.unshaded(Color(1, 0.8, 0.4, 0.35), true), Vector3(c.x + 0.5, top + 0.02, c.y + 0.5))
@@ -1343,6 +1464,46 @@ func _update_ghost() -> void:
 			txt += "\n" + "   ".join(extra)
 	hud.set_hint(txt + "\n[color=#8a93a6]R rotate · F mirror · H hold · right-click a slot to hold[/color]")
 	_update_range_preview(pv if ok else null)
+
+
+func select_unit(i: int) -> void:
+	if i < 0 or i >= g.deploy.pool.size():
+		return
+	unit_slot = i
+	kit_slot = -1
+	strike_mode = ""
+	selected = {}
+	ghost_sig = ""
+
+
+func toggle_unit_order() -> void:
+	unit_order = "advance" if unit_order == "hold" else "hold"
+
+
+func _update_unit_ghost() -> void:
+	grid.visible = false
+	if unit_slot >= g.deploy.pool.size():
+		unit_slot = -1
+		return
+	var kind: String = g.deploy.pool[unit_slot]
+	var hit: Variant = cam_rig.ground_at(mouse_pos, 0.0)
+	if hit == null:
+		ghost.visible = false
+		return
+	var pv := g.deploy.preview(g, kind, hit.x, hit.z)
+	var sig := "unit|%s|%.1f,%.1f" % [kind, pv.x, pv.y]
+	ghost.visible = playing
+	if sig != ghost_sig:
+		ghost_sig = sig
+		for c in ghost.get_children():
+			c.queue_free()
+		Kit.add(ghost, Kit.cylinder(0.7, 0.7, 0.06, 20), Kit.ghost_mat(pv.ok), Vector3(pv.x, _ground_y(pv.x, pv.y) + 0.05, pv.y))
+	var def: Dictionary = Bal.UNITS[kind]
+	if pv.ok:
+		_show_ring(Vector2(pv.x, pv.y), float(def.range))
+		hud.set_hint("[b]%s[/b]  [color=#8a93a6]order: %s (Tab switches) · click the road to deploy · right-click cancels[/color]" % [def.name, unit_order.capitalize()])
+	else:
+		hud.set_hint("[color=#ff8a7a]%s[/color]" % pv.reason)
 
 
 func _update_kit_ghost() -> void:
@@ -1529,6 +1690,131 @@ func open_tech() -> void:
 	hud.open_modal("Technologies", body, btns, 640)
 
 
+func _on_crate(e: Dictionary) -> void:
+	var core_p := _w(Board.CORE_PT.x + 2.0, Board.CORE_PT.y + 2.0, 0.2)
+	var crate := Node3D.new()
+	misc_root.add_child(crate)
+	crate.position = core_p + Vector3(0, 9, 0)
+	Kit.add(crate, Kit.bevel_box(Vector3(0.9, 0.7, 0.9)), Kit.wood(), Vector3(0, 0.35, 0))
+	Kit.add(crate, Kit.box(Vector3(0.95, 0.08, 0.95)), Kit.dark_iron(), Vector3(0, 0.55, 0))
+	Kit.add(crate, Kit.sphere(1.0, 12, true), Kit.std("chute", Color(0.9, 0.88, 0.8), 0.0, 0.9), Vector3(0, 2.2, 0))
+	var tw := crate.create_tween()
+	tw.tween_property(crate, "position", core_p, 1.6).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tw.tween_callback(func():
+		fx.burst(core_p + Vector3(0, 0.5, 0), 16, 3.0, Color(0.85, 0.7, 0.45), 0.08, 0.6, "debris", 8.0)
+		sfx.play_at("chop", core_p, 0.0, 1.4))
+	tw.tween_interval(1.2)
+	tw.tween_callback(crate.queue_free)
+	var counts := {}
+	for k in e.units:
+		counts[k] = counts.get(k, 0) + 1
+	var parts: PackedStringArray = []
+	for k in counts:
+		parts.append("%d %s" % [counts[k], Bal.UNITS[k].name])
+	hud.toast("Deployment round: no pieces. Supply crate: " + ", ".join(parts), Color(1, 0.85, 0.5), 4.0)
+	hud.toast("Drag units onto the road (UNITS panel or N). V = spectator camera", Color(0.85, 0.85, 0.8), 4.0)
+	report_due = true
+	sfx.play("bell")
+
+
+## Town panel: level, HP, production, districts; level up, rebuild, market.
+func open_town(id: int) -> void:
+	var t: Dictionary = g.towns.by_id(id)
+	if t.is_empty():
+		return
+	var prod: Dictionary = g.towns.production(g, t) if not t.fallen else {"ore": 0.0, "timber": 0.0, "water": 0.0}
+	var ds: PackedStringArray = []
+	for d in t.districts:
+		if d != "":
+			ds.append("[color=#ffcf6b]%s[/color] [color=#8a93a6]%s[/color]" % [Bal.DISTRICTS[d].name, Bal.DISTRICTS[d].effect])
+	var body := "[b]%s[/b] · HP %d/%d · houses %d units\nMakes per wave: [color=#f08c40]⬢ %.1f[/color]  [color=#e0b060]▮ %.1f[/color]  [color=#8cd8ff]≈ %.1f[/color]\n%s" % [
+		Bal.TOWN_LEVELS[t.level - 1] if not t.fallen else "Ruin", ceili(t.hp), int(g.towns.max_hp(t)), g.towns.housing(t), prod.ore, prod.timber, prod.water,
+		"\n".join(ds) if not ds.is_empty() else "[color=#8a93a6]No districts yet: each level adds one.[/color]"]
+	var vb: VBoxContainer = hud.open_modal("Town", body, [["Close", func(): hud.close_modal()]], 640)
+	var at := 2
+	if t.fallen:
+		var rb := Button.new()
+		var rc: Dictionary = g.towns.rebuild_cost(t)
+		rb.text = "Rebuild  " + Evolve.cost_text(rc)
+		rb.disabled = not Evolve.can_afford(g.base, rc) or g.phase != "calm"
+		rb.pressed.connect(func():
+			var er := g.rebuild_town(id)
+			if er != "":
+				hud.toast(er, Color(1, 0.6, 0.5), 1.4)
+			open_town(id))
+		vb.add_child(rb)
+		vb.move_child(rb, at)
+	elif t.level < 5:
+		var lc: Dictionary = g.towns.level_cost(t)
+		var ll := Label.new()
+		ll.text = "Grow to %s: %s%s" % [Bal.TOWN_LEVELS[t.level], Evolve.cost_text(lc), "" if t.level < 4 else "  (the hall becomes a Citadel)"]
+		vb.add_child(ll)
+		vb.move_child(ll, at)
+		at += 1
+		var hb := HBoxContainer.new()
+		vb.add_child(hb)
+		vb.move_child(hb, at)
+		at += 1
+		var picks: Array = Bal.DISTRICTS.keys() if t.level < 4 else [""]
+		for d in picks:
+			var b := Button.new()
+			b.text = Bal.DISTRICTS[d].name if d != "" else "Upgrade the hall"
+			b.tooltip_text = Bal.DISTRICTS[d].effect if d != "" else "Citadel"
+			b.disabled = not Evolve.can_afford(g.base, lc)
+			b.pressed.connect(func():
+				var er2 := g.level_town(id, d)
+				if er2 != "":
+					hud.toast(er2, Color(1, 0.6, 0.5), 1.4)
+				open_town(id))
+			hb.add_child(b)
+	if not t.fallen and t.districts.has("market"):
+		var mh := HBoxContainer.new()
+		vb.add_child(mh)
+		vb.move_child(mh, at)
+		var ml := Label.new()
+		ml.text = "Market 3 : 1" + (" (used this wave)" if t.market_used else "")
+		mh.add_child(ml)
+		for pair in [["ore", "timber"], ["ore", "water"], ["timber", "ore"], ["water", "ore"], ["ore", "pearls"]]:
+			var mb := Button.new()
+			mb.text = "%s → %s" % [pair[0].capitalize(), pair[1].capitalize()]
+			mb.disabled = t.market_used
+			mb.pressed.connect(func():
+				var er3 := g.town_market(id, pair[0], pair[1])
+				if er3 != "":
+					hud.toast(er3, Color(1, 0.6, 0.5), 1.4)
+				open_town(id))
+			mh.add_child(mb)
+	hud.call_deferred("_recentre")
+
+
+## Damage report (section 11.2): who did the work last wave, and where monsters got through.
+func open_report() -> void:
+	var rows: Array = g.deploy.report_rows()
+	var body := ""
+	if rows.is_empty():
+		body = "[color=#8a93a6]No damage recorded yet this wave.[/color]"
+	else:
+		body = "[table=5][cell][b]Source[/b]   [/cell][cell][b]Damage[/b]   [/cell][cell][b]Share[/b]   [/cell][cell][b]Kills[/b]   [/cell][cell][b]Overkill[/b][/cell]"
+		for r in rows.slice(0, 14):
+			body += "[cell]%s   [/cell][cell]%d   [/cell][cell]%d%%   [/cell][cell]%d   [/cell][cell][color=#8a93a6]%d[/color][/cell]" % [r.name, int(r.dmg), roundi(r.share * 100.0), r.kills, int(r.over)]
+		body += "[/table]"
+	var lk: Array = g.deploy.leaks
+	if lk.is_empty():
+		body += "\n\n[color=#7dffb0]Nothing got through.[/color]"
+	else:
+		var by := {}
+		for l in lk:
+			var key: String = ("town" if l.town != 0 else "road %d" % (int(l.ingress) + 1))
+			by[key] = by.get(key, 0) + 1
+		var lp: PackedStringArray = []
+		for k in by:
+			lp.append("%d via %s" % [by[k], k])
+		body += "\n\n[color=#ff8a7a]Leaked: %s[/color]" % ", ".join(lp)
+	hud.open_modal("Damage report · wave %d" % g.deploy.report_wave, body, [["Close", func(): hud.close_modal()]], 640)
+	for l in lk:
+		fx.ring(_w(l.x, l.y, 0.3), 0.3, 1.6, 1.5, Color(1, 0.4, 0.3, 0.8))
+
+
 func open_armory() -> void:
 	var vb: VBoxContainer = hud.open_modal("Armory", "[color=#8a93a6]Road kits go on the Kit belt (Shift+1–6); base-ring kits are built on a pad around the core. %s[/color]" % ("" if g.has_building("armory") else "Build the Armory at the base to unlock everything but Landmines and Spike traps."), [["Close", func(): hud.close_modal()]], 720)
 	var grid := GridContainer.new()
@@ -1545,7 +1831,7 @@ func open_armory() -> void:
 		l.text = "[b]%s[/b]  [color=#8a93a6]%s[/color]" % [k.name, k.note]
 		grid.add_child(l)
 		var cl := Label.new()
-		cl.text = Evolve.cost_text(k.cost)
+		cl.text = Evolve.cost_text(g.arsenal.kit_cost(g, id))
 		grid.add_child(cl)
 		var b := Button.new()
 		var err: String = g.arsenal.kit_blocked(g, id)
@@ -1557,6 +1843,27 @@ func open_armory() -> void:
 				hud.toast(e2, Color(1, 0.6, 0.5), 1.4)
 			open_armory())
 		grid.add_child(b)
+	var ch := HBoxContainer.new()
+	vb.add_child(ch)
+	vb.move_child(ch, vb.get_child_count() - 2)
+	var chl := RichTextLabel.new()
+	chl.bbcode_enabled = true
+	chl.fit_content = true
+	chl.custom_minimum_size = Vector2(420, 0)
+	chl.text = "[b]Town Charter[/b]  [color=#8a93a6]found another town (up to %d on this board)[/color]" % g.towns.max_towns(g.board_no)
+	ch.add_child(chl)
+	var chc := Label.new()
+	chc.text = Evolve.cost_text(g.charter_cost())
+	ch.add_child(chc)
+	var chb := Button.new()
+	chb.text = "Buy"
+	chb.disabled = not g.has_building("armory") or not Evolve.can_afford(g.base, g.charter_cost())
+	chb.pressed.connect(func():
+		var e4 := g.buy_charter()
+		if e4 != "":
+			hud.toast(e4, Color(1, 0.6, 0.5), 1.4)
+		open_armory())
+	ch.add_child(chb)
 	for i in 6:
 		var pd: Dictionary = g.arsenal.pads[i]
 		if pd.get("kind", "") != "howitzer":
@@ -1744,6 +2051,16 @@ func _click(pos: Vector2) -> void:
 		else:
 			strike_press = Vector2(hit.x, hit.z)
 		return
+	if unit_slot >= 0:
+		var uh: Variant = cam_rig.ground_at(pos, 0.0)
+		if uh != null:
+			var ur := g.deploy_unit(unit_slot, uh.x, uh.z, unit_order)
+			if ur.get("ok", false):
+				unit_slot = -1 if g.deploy.pool.is_empty() else mini(unit_slot, g.deploy.pool.size() - 1)
+				ghost_sig = ""
+			else:
+				hud.toast(ur.get("reason", "Can't deploy there"), Color(1, 0.6, 0.5), 1.2)
+		return
 	if kit_slot >= 0:
 		var res0 := g.place_kit(kit_slot, kit_rot, cell.x, cell.y)
 		if res0.get("ok", false):
@@ -1779,6 +2096,20 @@ func _click(pos: Vector2) -> void:
 			else:
 				g.pop_pimple(pm.id)
 			return
+	# units: click toggles Hold / Advance
+	var gh: Variant = cam_rig.ground_at(pos, 0.0)
+	if gh != null:
+		var uid := settle_view.unit_at_point(gh.x, gh.z)
+		if uid != 0:
+			var u := g.deploy.by_id(uid)
+			g.deploy.set_order(uid, "advance" if u.order == "hold" else "hold")
+			hud.toast("%s: %s" % [g.deploy.unit_name(u.kind), "Advance (move up the road, hold at first contact)" if u.order == "advance" else "Hold"], Color(0.9, 0.85, 0.7), 1.4)
+			sfx.play("click")
+			return
+		var town_id := settle_view.town_at_point(gh.x, gh.z)
+		if town_id != 0:
+			open_town(town_id)
+			return
 	# select a tower
 	if Board.in_grid(cell.x, cell.y):
 		var tid := g.tower_at[Board.cell_idx(cell.x, cell.y)]
@@ -1795,6 +2126,10 @@ func _auto_next() -> Dictionary:
 
 
 func _cancel() -> void:
+	if unit_slot >= 0:
+		unit_slot = -1
+		ghost_sig = ""
+		return
 	if strike_mode != "":
 		strike_mode = ""
 		strike_press = null
@@ -1827,6 +2162,15 @@ func _key(k: Key) -> void:
 			cycle_priority()
 		KEY_K:
 			open_armory()
+		KEY_J:
+			open_report()
+		KEY_TAB:
+			toggle_unit_order()
+			if unit_slot >= 0:
+				ghost_sig = ""
+		KEY_N:
+			if not g.deploy.pool.is_empty():
+				select_unit(0 if unit_slot < 0 else (unit_slot + 1) % g.deploy.pool.size())
 		KEY_Y:
 			open_tech()
 		KEY_U:

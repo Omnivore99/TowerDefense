@@ -79,6 +79,10 @@ var wave_rng: Rng
 var _tower_index := {}
 var eco: Economy
 var arsenal: Arsenal
+var towns: Towns
+var deploy: Deploy
+## Walls districts put a small Gun turret at each town gate.
+var gate_turrets: Array[SimTower] = []
 var metronome_assist := false
 var _aura_t := 0.0
 
@@ -89,6 +93,8 @@ func _init(seed_value: int, mode_id: String = "normal", opts: Dictionary = {}) -
 	base = new_base()
 	eco = Economy.new(self)
 	arsenal = Arsenal.new()
+	towns = Towns.new()
+	deploy = Deploy.new()
 	tutorial_enabled = opts.get("tutorial", true)
 	tower_at.resize(Bal.GRID_W * Bal.GRID_H)
 	obj_at.resize(Bal.GRID_W * Bal.GRID_H)
@@ -107,7 +113,7 @@ static func new_base() -> Dictionary:
 	for _s in Bal.BASE_SQUARES:
 		b.append("")
 	return {"unlocked": Bal.BASE_START_SQUARES, "buildings": b, "essence": 0.0, "ore": 0.0, "timber": 0.0, "water": 0.0, "pearls": 0, "lanceLevel": 0, "lanceCharges": 0,
-		"tech": {"steam": 0, "aether": 0, "alchemy": 0}, "freeTech": false, "freeTechGiven": false, "researchTech": ""}
+		"tech": {"steam": 0, "aether": 0, "alchemy": 0}, "freeTech": false, "freeTechGiven": false, "researchTech": "", "charterGiven": false}
 
 
 func has_building(id: String) -> bool:
@@ -171,6 +177,8 @@ func snapshot() -> Dictionary:
 		"nextId": next_id,
 		"eco": eco.serialize(),
 		"arsenal": arsenal.serialize(),
+		"towns": towns.serialize(),
+		"deploy": deploy.serialize(),
 	}
 
 
@@ -215,7 +223,11 @@ func restore(snap: Dictionary) -> void:
 			obj_at[Board.cell_idx(c.x, c.y)] = rp.id
 	arsenal = Arsenal.new()
 	arsenal.load_data(s.get("arsenal", {}))
-	for k in ["tech", "freeTech", "freeTechGiven", "researchTech"]:
+	towns = Towns.new()
+	towns.load_data(s.get("towns", {}))
+	deploy = Deploy.new()
+	deploy.load_data(s.get("deploy", {}))
+	for k in ["tech", "freeTech", "freeTechGiven", "researchTech", "charterGiven"]:
 		if not base.has(k):
 			base[k] = new_base()[k]
 	harvesters = s.harvesters
@@ -226,6 +238,7 @@ func restore(snap: Dictionary) -> void:
 	may = s.may
 	hold = s.hold
 	_recompute_entries()
+	_refresh_gate_turrets()
 
 
 func _blank_tower(id: int, h: int) -> SimTower:
@@ -258,7 +271,7 @@ func _entries_for(cells: Array) -> Dictionary:
 	var set := {}
 	for c in cells:
 		set[c] = true
-	for r in board.routes:
+	for r in board.routes + board.town_routes:
 		var d := 0.0
 		while d < r.length:
 			var p := r.at(d)
@@ -281,13 +294,15 @@ func start_board(b: int) -> void:
 		board_made = true
 		eco.attach(board)
 	else:
-		var plan := board.plan_road(b, func(c: int) -> bool: return obj_at[c] != 0 or tower_at[c] != 0 or arsenal.off_at.has(c))
+		var plan := board.plan_road(b, func(c: int) -> bool: return obj_at[c] != 0 or tower_at[c] != 0 or arsenal.off_at.has(c) or towns.town_at.has(c))
 		board.set_pending(plan.path)
 		strike_destroys = plan.destroys
 	enemies.clear()
 	projectiles.clear()
 	puddles.clear()
 	tanks.clear()
+	deploy.units.clear()
+	deploy.reset_report(0)
 	last_place = {}
 	var slots := Bal.MAY_SLOTS + (1 if has_building("beacon") else 0)
 	var kept: Array = may.filter(func(p): return p != null)
@@ -368,7 +383,7 @@ func _finish_reveal() -> void:
 				obj_at[Board.cell_idx(c.x, c.y)] = 0
 		strike_destroys = []
 		_reindex()
-	board.commit_pending(func(c: int) -> bool: return obj_at[c] != 0 or tower_at[c] != 0)
+	board.commit_pending(occupied_fn())
 	_recompute_entries()
 	events.append({"t": "revealDone"})
 	eco.refill_lance()
@@ -388,6 +403,10 @@ func _finish_reveal() -> void:
 			add_piece(stream.make(r.pick(["T", "I", "O", "L"]), r.pick(["red", "gold", "green", "blue"]), r.pick(Pieces.RARE_GLYPHS)), true)
 			if building_mult("research") > 1.0:
 				add_piece(stream.make(r.pick(["c1", "c2", "c3"]), "gold", r.pick(Pieces.COMMON_GLYPHS)), true)
+	if board_no >= 2 and not base.charterGiven:
+		base.charterGiven = true
+		add_piece(stream.make("charter", "gold"), true)
+		events.append({"t": "charter"})
 	_set_phase("calm")
 
 
@@ -406,6 +425,9 @@ func ready() -> void:
 func _start_wave() -> void:
 	wave_index += 1
 	wave = Waves.make_wave(seed, board_no, wave_index, mode)
+	deploy.reset_report(wave_index)
+	if wave.get("deploy", false):
+		deploy.open_crate(self)
 	spawn_queue = []
 	var at := 0.0
 	var k := 0
@@ -437,6 +459,15 @@ func _end_wave() -> void:
 	if gained.ore + gained.timber + gained.water > 0.0:
 		events.append({"t": "harvest", "ore": gained.ore, "timber": gained.timber, "water": gained.water})
 	arsenal.wave_end()
+	deploy.wave_end(self)
+	var town_got := towns.end_wave(self)
+	if town_got.ore + town_got.timber + town_got.water > 0.0:
+		events.append({"t": "townHarvest", "ore": town_got.ore, "timber": town_got.timber, "water": town_got.water})
+	for _i in towns.count_district("workshop"):
+		var slot: int = arsenal.belt.find("")
+		if slot >= 0:
+			arsenal.belt[slot] = "landmine"
+			events.append({"t": "kitBought", "kind": "landmine", "free": true})
 	projectiles.clear()
 	puddles.clear()
 	tanks.clear()
@@ -462,7 +493,8 @@ func _finish_metrics() -> void:
 			marks[t.mark - 1] += 1
 	metrics["extra"] = {"pimpleShare": eco.pimple_income / tot if tot > 0.0 else 0.0, "timber": base.timber, "water": base.water, "pearls": base.pearls,
 		"mk2": marks[1], "mk3": marks[2], "mk4": marks[3], "techMax": tech_level(best_tech()), "kits": arsenal.traps.size() + arsenal.metronomes.size() + arsenal.rams.size(),
-		"pads": 6 - arsenal.pads.count({})}
+		"pads": 6 - arsenal.pads.count({}), "towns": towns.list.filter(func(t): return not t.fallen).size(),
+		"townLevels": towns.list.reduce(func(a, t): return a + int(t.level), 0), "units": deploy.pool.size()}
 	all_metrics.append(metrics.duplicate())
 
 
@@ -480,6 +512,7 @@ func next_board() -> void:
 	attempt = 1
 	eco.refill_lakes()
 	arsenal.next_board()
+	deploy.board_end(self)
 	if has_building("research"):
 		var rt: String = base.researchTech if base.researchTech != "" else best_tech()
 		base.tech[rt] = int(base.tech[rt]) + 1
@@ -771,7 +804,82 @@ func level_at(t: SimTower, x: int, y: int) -> int:
 
 
 func can_place_pieces() -> bool:
-	return phase == "calm" or phase == "wave"
+	return phase == "calm" or (phase == "wave" and not is_deploy_round())
+
+
+## Deployment round (section 11): no pieces arrive and none can be placed.
+func is_deploy_round() -> bool:
+	return phase == "wave" and wave.get("deploy", false)
+
+
+## Every cell something stands on (pieces, kits, towns).
+func cell_taken(i: int) -> bool:
+	return obj_at[i] != 0 or tower_at[i] != 0 or arsenal.off_at.has(i) or arsenal.trap_at.has(i) or towns.town_at.has(i)
+
+
+func occupied_fn() -> Callable:
+	return func(c: int) -> bool: return obj_at[c] != 0 or tower_at[c] != 0 or towns.town_at.has(c)
+
+
+# ---------------------------------------------------------------- towns (section 12)
+func charter_cost() -> Dictionary:
+	return Bal.CHARTER_COSTS[mini(towns.charters_bought, Bal.CHARTER_COSTS.size() - 1)]
+
+
+func buy_charter() -> String:
+	if not has_building("armory"):
+		return "Build the Armory first"
+	if may.find(null) < 0:
+		return "MAY USE is full"
+	var c := charter_cost()
+	if not Evolve.can_afford(base, c):
+		return "Not enough resources"
+	Evolve.pay(base, c)
+	towns.charters_bought += 1
+	add_piece(stream.make("charter", "gold"), true)
+	events.append({"t": "charter"})
+	return ""
+
+
+func level_town(id: int, district: String) -> String:
+	return towns.level_up(self, id, district)
+
+
+func rebuild_town(id: int) -> String:
+	return towns.rebuild(self, id)
+
+
+func town_market(id: int, from: String, to: String) -> String:
+	return towns.market(self, id, from, to)
+
+
+func _refresh_gate_turrets() -> void:
+	gate_turrets.clear()
+	if towns == null:
+		return
+	for t in towns.list:
+		if t.fallen or not t.districts.has("walls"):
+			continue
+		var gt := _make_base_tower("Gun", float(t.x), float(t.y), float(t.districts.count("walls")), 9.0)
+		gt.hint = "Gate turret"
+		gate_turrets.append(gt)
+
+
+# ---------------------------------------------------------------- deployment (section 11)
+func deploy_unit(pool_index: int, x: float, y: float, order: String = "hold") -> Dictionary:
+	if phase != "wave" and phase != "calm":
+		return {"ok": false, "reason": "Not now"}
+	return deploy.deploy(self, pool_index, x, y, order)
+
+
+## Cloaked monsters are invisible beyond 8 cells; burrowed ones are underground.
+func hidden_from(e: SimEnemy, x: float, y: float) -> bool:
+	if e.burrowed:
+		return true
+	if e.special == "cloaked" and e.special_on():
+		var r: float = Bal.SPECIAL_FX.cloakRange
+		return (e.x - x) * (e.x - x) + (e.y - y) * (e.y - y) > r * r
+	return false
 
 
 func _bad(reason: String, cells: Array) -> Dictionary:
@@ -780,15 +888,21 @@ func _bad(reason: String, cells: Array) -> Dictionary:
 
 ## Preview a placement: {ok, reason, cells, kind (tower|story|harvester|barrier|mine|invalid), towerId, mergeIds, layer, resultType, needs, hint, gained, lost, holes, dps, range}
 func preview(piece: Dictionary, rot: int, mirror: bool, cx: int, cy: int) -> Dictionary:
+	if Pieces.is_charter(piece):
+		var tp := towns.preview(self, cx, cy)
+		tp.merge({"gained": ["Found a town here"] if tp.ok else [], "lost": [], "holes": []})
+		if not tp.ok:
+			tp.kind = "invalid"
+		return tp
 	var cells := Pieces.placed_cells(piece.kind, rot, mirror, cx, cy)
 	if not can_place_pieces():
-		return _bad("Wait for the road", cells)
+		return _bad("Deployment round: no building" if is_deploy_round() else "Wait for the road", cells)
 	for c in cells:
 		if not Board.in_grid(c.x, c.y):
 			return _bad("Off the board", cells)
 		if board.is_core_cell(c.x, c.y):
 			return _bad("That is the core", cells)
-		if obj_at[Board.cell_idx(c.x, c.y)] != 0:
+		if obj_at[Board.cell_idx(c.x, c.y)] != 0 or towns.town_at.has(Board.cell_idx(c.x, c.y)):
 			return _bad("Occupied", cells)
 		if arsenal.off_at.has(Board.cell_idx(c.x, c.y)) or arsenal.trap_at.has(Board.cell_idx(c.x, c.y)):
 			return _bad("A kit is there", cells)
@@ -1016,6 +1130,13 @@ func place(s: Dictionary, rot: int, mirror: bool, cx: int, cy: int) -> Dictionar
 		events.append({"t": "reject", "reason": pv.get("reason", "Illegal")})
 		return pv
 	var undo_state: Dictionary = _capture_undo() if undo_enabled else {}
+	if pv.kind == "town":
+		_take_piece(s)
+		hold_locked = false
+		last_place = {}
+		towns.place(self, pv)
+		_recompute_entries()
+		return pv
 	_take_piece(s)
 	hold_locked = false
 	metrics.piecesPlaced += 1
@@ -1205,20 +1326,14 @@ func step() -> void:
 	metrics.maxBacklog = maxi(metrics.maxBacklog, must.size())
 	if must.size() > 2:
 		metrics.backlogOver2 += dt
-	piece_timer -= dt
-	if piece_timer <= 0.0:
-		piece_timer += Bal.WAVE_PIECE_INTERVAL
-		add_piece(stream.next(), false)
+	if not wave.get("deploy", false):
+		piece_timer -= dt
+		if piece_timer <= 0.0:
+			piece_timer += Bal.WAVE_PIECE_INTERVAL
+			add_piece(stream.next(), false)
 	while not spawn_queue.is_empty() and spawn_queue[0].at <= wave_t:
 		var item: Dictionary = spawn_queue.pop_front()
 		_spawn(item.spec)
-	if has_building("factory"):
-		factory_t -= dt
-		if factory_t <= 0.0 and not board.routes.is_empty():
-			factory_t += Bal.BUILDING_FX.factoryEvery
-			var r: Route = combat.pick(board.routes)
-			tanks.append({"id": next_id, "route": r, "d": r.length - 2.0, "x": Board.CORE_PT.x, "y": Board.CORE_PT.y, "px": Board.CORE_PT.x, "py": Board.CORE_PT.y, "dir": 0.0, "cd": 0.0, "alive": true})
-			next_id += 1
 	for e in enemies:
 		e.px = e.x
 		e.py = e.y
@@ -1232,9 +1347,12 @@ func step() -> void:
 	_step_towers(dt)
 	if battery_tower != null:
 		_fire_tower(battery_tower, dt)
+	for gt in gate_turrets:
+		_fire_tower(gt, dt)
 	_step_projectiles(dt)
 	_step_puddles(dt)
 	_step_tanks(dt)
+	deploy.step(self, dt)
 	_step_mines()
 	arsenal.step(self, dt)
 	var alive_e: Array[SimEnemy] = []
@@ -1459,6 +1577,10 @@ func _step_enemies(dt: float) -> void:
 		if e.stun_t > 0.0:
 			e.stun_t -= dt
 			v = 0.0
+		if e.special != "":
+			v = _step_special(e, v, dt)
+			if not e.sap.is_empty():
+				continue
 		e.chewing = 0
 		if not e.overland:
 			for rp in road_pieces:
@@ -1474,11 +1596,130 @@ func _step_enemies(dt: float) -> void:
 					if rp.hp <= 0.0:
 						_break_barrier(rp)
 					break
+		if e.chewing == 0 and not e.overland and v > 0.0:
+			var nxt := e.route.at(e.d + v * dt)
+			var u := deploy.blocker_for(e, nxt.x, nxt.y)
+			if not u.is_empty():
+				e.chewing = -int(u.id)
+				deploy.chew(self, u, e, dt)
 		if e.chewing == 0:
+			var prev_d := e.d
 			e.d += v * dt
+			if not e.route.diverts.is_empty():
+				towns.maybe_divert(self, e, prev_d)
 		_place_on_route(e)
 		if e.d >= e.route.length:
 			_leak(e)
+
+
+## Leaper, Sapper and Burrower movement. Returns the speed to use this tick.
+func _step_special(e: SimEnemy, v: float, dt: float) -> float:
+	var on := e.special_on()
+	match e.special:
+		"burrower":
+			e.burrow_t += dt
+			var every: float = Bal.SPECIAL_FX.burrowEvery
+			var was := e.burrowed
+			e.burrowed = on and fmod(e.burrow_t, every) > every - float(Bal.SPECIAL_FX.burrowTime)
+			if e.burrowed != was:
+				events.append({"t": "burrow", "id": e.id, "down": e.burrowed, "x": e.x, "y": e.y})
+		"leaper":
+			if e.leap_t > 0.0:
+				e.leap_t -= dt
+				e.airborne = true
+				return v + 3.0 / 0.7
+			if not on or e.overland:
+				return v
+			for tr in arsenal.traps:
+				if e.leapt.has(tr.id):
+					continue
+				var dx: float = tr.x - e.x
+				var dy: float = tr.y - e.y
+				if dx * dx + dy * dy < 3.2 and dx * cos(e.dir) + dy * sin(e.dir) > 0.0:
+					e.leapt[tr.id] = true
+					e.leap_t = 0.7
+					e.airborne = true
+					events.append({"t": "leap", "id": e.id, "x": e.x, "y": e.y})
+					return v + 3.0 / 0.7
+			for rp in road_pieces:
+				if rp.kind != "mine" or e.leapt.has(rp.id):
+					continue
+				var c: Vector2i = rp.cells[0]
+				var mx: float = c.x + 0.5 - e.x
+				var my: float = c.y + 0.5 - e.y
+				if mx * mx + my * my < 3.2 and mx * cos(e.dir) + my * sin(e.dir) > 0.0:
+					e.leapt[rp.id] = true
+					e.leap_t = 0.7
+					e.airborne = true
+					events.append({"t": "leap", "id": e.id, "x": e.x, "y": e.y})
+					return v + 3.0 / 0.7
+		"sapper":
+			if e.sap.is_empty():
+				if not on or e.sap_done or e.overland or fmod(e.anim_t, 1.0) > dt:
+					return v
+				var tgt := _sap_target(e)
+				if tgt.is_empty():
+					return v
+				e.sap = tgt
+				e.sap["phase"] = "go"
+				e.sap["t"] = 0.0
+				events.append({"t": "sapper", "id": e.id, "x": e.x, "y": e.y})
+			_step_sap(e, v, dt)
+	return v
+
+
+func _sap_target(e: SimEnemy) -> Dictionary:
+	var r: float = Bal.SPECIAL_FX.sapRange
+	var best := {}
+	var bd := r
+	for h in harvesters:
+		for c in h.cells:
+			var dd := Vector2(c.x + 0.5 - e.x, c.y + 0.5 - e.y).length()
+			if dd < bd:
+				bd = dd
+				best = {"kind": "harvester", "id": h.id, "x": c.x + 0.5, "y": c.y + 0.5}
+	for p in eco.pimples:
+		var px: float = p.cell % Bal.GRID_W + 0.5
+		var py: float = p.cell / Bal.GRID_W + 0.5
+		var dd2 := Vector2(px - e.x, py - e.y).length()
+		if dd2 < bd:
+			bd = dd2
+			best = {"kind": "pimple", "id": p.id, "x": px, "y": py}
+	return best
+
+
+func _step_sap(e: SimEnemy, v: float, dt: float) -> void:
+	var sp := e.sap
+	var home := e.route.at(e.d)
+	var to := Vector2(sp.x - e.x, sp.y - e.y) if sp.phase != "back" else Vector2(home.x - e.x, home.y - e.y)
+	var dist := to.length()
+	match sp.phase:
+		"go", "back":
+			var stepd := minf(dist, maxf(v, 0.4) * dt)
+			if dist > 0.001:
+				e.x += to.x / dist * stepd
+				e.y += to.y / dist * stepd
+				e.dir = atan2(to.y, to.x)
+			if dist < 0.6:
+				if sp.phase == "go":
+					sp.phase = "work"
+				else:
+					e.sap = {}
+					e.sap_done = true
+		"work":
+			sp.t += dt
+			if sp.t >= Bal.SPECIAL_FX.sapTime:
+				sp.phase = "back"
+				if sp.kind == "pimple":
+					for p in eco.pimples:
+						if p.id == sp.id:
+							eco.spoil(p)
+							break
+				else:
+					for h in harvesters:
+						if h.id == sp.id:
+							h["sapped"] = true
+				events.append({"t": "sabotage", "kind": sp.kind, "x": sp.x, "y": sp.y})
 
 
 func _arm_barrier(rp: Dictionary) -> void:
@@ -1501,6 +1742,10 @@ func _leak(e: SimEnemy) -> void:
 	var dmg: int = Bal.SIZES[e.size].leak + (Bal.ABILITIES.growerLeak if e.ability == "post" else 0) + (1 if e.tier >= 3 else 0)
 	if is_tutorial() and wave_t < 20.0:
 		dmg = 0
+	deploy.record_leak(e)
+	if e.route.town_id != 0:
+		towns.hit(self, e.route.town_id, float(dmg))
+		return
 	var from_buffer := mini(buffer, dmg)
 	buffer -= from_buffer
 	integrity -= dmg - from_buffer
@@ -1514,6 +1759,13 @@ func damage(e: SimEnemy, amount: float, t: SimTower, o: Dictionary = {}) -> floa
 	if not e.alive:
 		return 0.0
 	var is_dot: bool = o.get("dot", false)
+	if e.burrowed and (o.get("unit", false) or (t != null and t.type != "Bomb")):
+		return 0.0
+	if e.special == "mirror" and not e.mirror_used and o.get("beam", false) and t != null and not t.base_tower and e.special_on():
+		e.mirror_used = true
+		t.stun_t = Bal.SPECIAL_FX.mirrorStun
+		events.append({"t": "mirror", "x": e.x, "y": e.y, "x2": t.cx, "y2": t.cy, "towerId": t.id})
+		return 0.0
 	if e.immune:
 		if not is_dot and combat.chance(0.2):
 			events.append({"t": "immune", "x": e.x, "y": e.y})
@@ -1566,6 +1818,8 @@ func damage(e: SimEnemy, amount: float, t: SimTower, o: Dictionary = {}) -> floa
 		e.shield -= s
 		dmg -= s
 	e.hp -= dmg
+	var key: String = ("t%d" % t.id) if t != null else String(o.get("src", "other"))
+	deploy.record(key, _source_name(key, t), dmg + minf(0.0, e.hp), maxf(0.0, -e.hp), e.hp <= 0.0)
 	if t != null:
 		e.last_tower = t.id
 	if not is_dot:
@@ -1586,6 +1840,17 @@ func damage(e: SimEnemy, amount: float, t: SimTower, o: Dictionary = {}) -> floa
 	if e.hp <= 0.0:
 		_kill(e, t)
 	return dmg
+
+
+func _source_name(key: String, t: SimTower) -> String:
+	if t != null:
+		return t.hint if t.base_tower else "%s Mk %s" % [t.type, ["I", "II", "III", "IV"][t.mark - 1]]
+	if key.begins_with("u"):
+		var u := deploy.by_id(int(key.substr(1)))
+		return deploy.unit_name(u.kind) if not u.is_empty() else "Unit"
+	if Bal.KITS.has(key):
+		return Bal.KITS[key].name
+	return key.capitalize()
 
 
 func _slow(e: SimEnemy, mult: float, t: float) -> void:
@@ -1687,10 +1952,14 @@ func can_hit(t: SimTower, e: SimEnemy) -> bool:
 		return false
 	if e.arch == "balloon" and not t.air:
 		return false
+	if e.burrowed and t.type != "Bomb":
+		return false
 	return true
 
 
 func in_range(t: SimTower, e: SimEnemy, r: float) -> bool:
+	if e.special == "cloaked" and e.special_on():
+		r = minf(r, Bal.SPECIAL_FX.cloakRange)
 	var rr: float = r + e.radius
 	return (e.x - t.cx) * (e.x - t.cx) + (e.y - t.cy) * (e.y - t.cy) <= rr * rr
 
@@ -1804,6 +2073,9 @@ func _step_towers(dt: float) -> void:
 				corroded = true
 				break
 		t.corroded = corroded
+		if t.stun_t > 0.0:
+			t.stun_t -= dt
+			continue
 		_fire_tower(t, dt * Bal.ABILITIES.corrosiveRate if corroded else dt)
 
 
@@ -2285,6 +2557,27 @@ func _step_tanks(dt: float) -> void:
 				events.append({"t": "shot", "towerId": -1, "kind": "tank", "x1": k.x, "y1": k.y, "x2": tgt.x, "y2": tgt.y, "color": "gold"})
 				damage(tgt, Bal.BUILDING_FX.tankDps * 0.382 * mult * (float(wave.unitHp) / 100.0 if not wave.is_empty() else 1.0), null, {"single": true})
 	tanks = tanks.filter(func(k): return k.alive)
+
+
+func _make_base_tower(type: String, x: float, y: float, mult: float, rng: float) -> SimTower:
+	var def: Dictionary = Bal.TOWERS[type]
+	var t := _blank_tower(next_id, 0)
+	next_id += 1
+	t.layers = [[Vector2i(int(x), int(y))]]
+	t.type = type
+	t.active = true
+	t.activate_t = 99.0
+	t.cx = x
+	t.cy = y
+	t.base_tower = true
+	t.air = false
+	var dmg: float = def.dps * def.interval * mult
+	t.stats = {
+		"damage": dmg, "interval": def.interval, "range": rng, "area": def.get("area", 0.0), "maxTargets": def.get("maxTargets", 1), "dps": dmg / def.interval,
+		"pierce": 0, "chain": 0, "critChance": 0.0, "slowOnHit": 0.0, "essenceMult": 1.0, "slowTrait": 0.0, "dotTrait": 0.0, "color": "", "resonance": "",
+		"spire": false, "pure": false, "stories": 1, "bonuses": [], "shape": Towers.analyse_shape([Vector2i.ZERO]), "hint": "",
+	}
+	return t
 
 
 func _make_battery() -> SimTower:

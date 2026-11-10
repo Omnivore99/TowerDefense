@@ -69,9 +69,21 @@ func kit_blocked(g, id: String) -> String:
 			return "Only one"
 	elif belt.find("") < 0:
 		return "Kit belt full"
-	if not Evolve.can_afford(g.base, k.cost):
+	if not Evolve.can_afford(g.base, kit_cost(g, id)):
 		return "Not enough resources"
 	return ""
+
+
+## Kit cost after Workshop districts (-20% Ore and Timber each, up to -60%).
+func kit_cost(g, id: String) -> Dictionary:
+	var c: Dictionary = Bal.KITS[id].cost.duplicate()
+	var n: int = g.towns.count_district("workshop") if g.towns != null else 0
+	if n > 0 and Bal.KITS[id].where != "ring":
+		var f := 1.0 - minf(0.6, Bal.TOWN.workshop * n)
+		for k in ["ore", "timber"]:
+			if c.has(k):
+				c[k] = ceilf(float(c[k]) * f)
+	return c
 
 
 func buy(g, id: String) -> String:
@@ -79,7 +91,7 @@ func buy(g, id: String) -> String:
 	if err != "":
 		return err
 	var k: Dictionary = Bal.KITS[id]
-	Evolve.pay(g.base, k.cost)
+	Evolve.pay(g.base, kit_cost(g, id))
 	if k.where == "ring":
 		var i := free_pad(g.base)
 		var pad := {"kind": id, "cd": 2.0, "ready": false, "cal": 0, "rif": 0, "auto": 0, "angle": PI, "priority": "most", "charge": 0.0}
@@ -151,7 +163,7 @@ func preview(g, id: String, rot: int, cx: int, cy: int) -> Dictionary:
 		var i := Board.cell_idx(c.x, c.y)
 		if b.is_core_cell(c.x, c.y):
 			return bad.call("That is the core")
-		if trap_at.has(i) or off_at.has(i):
+		if trap_at.has(i) or off_at.has(i) or g.towns.town_at.has(i):
 			return bad.call("Kit already there")
 		if where == "road":
 			if not b.is_road(c.x, c.y):
@@ -445,14 +457,14 @@ func _step_shells(g, dt: float) -> void:
 		s.x = lerpf(s.sx, s.tx, k)
 		s.y = lerpf(s.sy, s.ty, k)
 		if k >= 1.0:
-			_area(g, s.tx, s.ty, s.r, s.dmg, true)
+			_area(g, s.tx, s.ty, s.r, s.dmg, true, true, "howitzer")
 			g.events.append({"t": "shellHit", "x": s.tx, "y": s.ty, "r": s.r, "id": s.id})
 			if s.cluster:
 				for j in 5:
 					var a := j * TAU / 5.0
 					var bx: float = s.tx + cos(a) * 2.6
 					var by: float = s.ty + sin(a) * 2.6
-					_area(g, bx, by, 1.4, s.dmg * 0.3, true)
+					_area(g, bx, by, 1.4, s.dmg * 0.3, true, true, "howitzer")
 					g.events.append({"t": "explode", "x": bx, "y": by, "r": 1.4, "color": "gold"})
 	shells = shells.filter(func(s): return s.t < s.dur)
 
@@ -471,19 +483,19 @@ func _step_blasts(g) -> void:
 					var d := Vector2(e.x - b.x, e.y - b.y).length()
 					if d <= r + e.radius and d >= b.r - 0.5:
 						b.hit[e.id] = true
-						g.damage(e, b.dmg, null, {"area": true, "ignoreShield": true})
+						g.damage(e, b.dmg, null, {"area": true, "ignoreShield": true, "src": "orbital"})
 			if k < 1.0:
 				keep.append(b)
 			continue
 		if t < b.at:
 			keep.append(b)
 			continue
-		_area(g, b.x, b.y, b.r, b.dmg, false, true)
+		_area(g, b.x, b.y, b.r, b.dmg, false, true, b.kind)
 		g.events.append({"t": "blast", "x": b.x, "y": b.y, "r": b.r, "kind": b.kind})
 	blasts = keep
 
 
-func _area(g, x: float, y: float, r: float, dmg: float, ground_only: bool, air_ok: bool = true) -> int:
+func _area(g, x: float, y: float, r: float, dmg: float, ground_only: bool, air_ok: bool = true, src: String = "") -> int:
 	var n := 0
 	for e: SimEnemy in g.enemies:
 		if not e.alive:
@@ -491,7 +503,7 @@ func _area(g, x: float, y: float, r: float, dmg: float, ground_only: bool, air_o
 		if ground_only and e.airborne and not air_ok:
 			continue
 		if Vector2(e.x - x, e.y - y).length() <= r + e.radius:
-			g.damage(e, dmg, null, {"area": true, "splash": true})
+			g.damage(e, dmg, null, {"area": true, "splash": true, "src": src})
 			n += 1
 	return n
 
@@ -505,14 +517,14 @@ func _step_traps(g, dt: float, unit: float) -> void:
 			"landmine":
 				for e: SimEnemy in g.enemies:
 					if e.alive and not e.airborne and not e.overland and Vector2(e.x - cx, e.y - cy).length() < 0.7 + e.radius * 0.5:
-						_area(g, cx, cy, Bal.TRAP.landmineR, Bal.TRAP.landmineUnits * unit, false)
+						_area(g, cx, cy, Bal.TRAP.landmineR, Bal.TRAP.landmineUnits * unit, false, true, "landmine")
 						g.events.append({"t": "trap", "kind": "landmine", "x": cx, "y": cy, "r": Bal.TRAP.landmineR})
 						gone.append(tr)
 						break
 			"betty":
 				for e: SimEnemy in g.enemies:
 					if e.alive and not e.overland and Vector2(e.x - cx, e.y - cy).length() < 1.0 + e.radius * 0.5:
-						_area(g, cx, cy, Bal.TRAP.bettyR, Bal.TRAP.bettyUnits * unit, false)
+						_area(g, cx, cy, Bal.TRAP.bettyR, Bal.TRAP.bettyUnits * unit, false, true, "betty")
 						g.events.append({"t": "trap", "kind": "betty", "x": cx, "y": cy, "r": Bal.TRAP.bettyR})
 						gone.append(tr)
 						break
@@ -530,7 +542,7 @@ func _step_traps(g, dt: float, unit: float) -> void:
 								continue
 							var diff := absf(wrapf(atan2(dy, dx) - dir, -PI, PI))
 							if dist < 1.2 or diff < 0.6:
-								g.damage(o, Bal.TRAP.claymoreUnits * unit, null, {"area": true})
+								g.damage(o, Bal.TRAP.claymoreUnits * unit, null, {"area": true, "src": "claymore"})
 						g.events.append({"t": "trap", "kind": "claymore", "x": cx, "y": cy, "dir": tr.dir, "r": Bal.TRAP.claymoreLen})
 						gone.append(tr)
 						break
@@ -540,7 +552,7 @@ func _step_traps(g, dt: float, unit: float) -> void:
 						continue
 					if _inside(tr.cells, e.x, e.y):
 						tr.hit_ids[e.id] = true
-						g.damage(e, Bal.TRAP.spikeUnits * unit, null, {"single": true})
+						g.damage(e, Bal.TRAP.spikeUnits * unit, null, {"single": true, "src": "spike"})
 						g._add_dot(e, {"kind": "bleed", "dps": 0.25 * unit, "t": 2.0, "tower": 0})
 						tr.hits -= 1
 						g.events.append({"t": "trap", "kind": "spike", "x": e.x, "y": e.y, "id": tr.id})
@@ -556,7 +568,7 @@ func _step_traps(g, dt: float, unit: float) -> void:
 					g._slow(e, Bal.TRAP.tarSlow, 0.25)
 					e.tarred = 0.3
 					if tr.burn > 0.0:
-						g.damage(e, 2.0 * unit * dt, null, {"dot": true, "area": true})
+						g.damage(e, 2.0 * unit * dt, null, {"dot": true, "area": true, "src": "tar"})
 					elif tr.burn > -5.0:
 						for dd in e.dots:
 							if dd.kind == "burn":
@@ -612,7 +624,7 @@ func _step_metronomes(g, dt: float, unit: float) -> void:
 					if not found:
 						e.dots.append({"kind": "rot", "dps": Bal.METRONOME.rotFrac * unit * a, "t": Bal.METRONOME.rotT, "tower": 0, "stacks": 1})
 				"thunder":
-					g.damage(e, Bal.METRONOME.thunderUnits * unit * a, null, {"area": true})
+					g.damage(e, Bal.METRONOME.thunderUnits * unit * a, null, {"area": true, "src": "metronome_thunder"})
 				"molasses":
 					g._slow(e, 1.0 - (1.0 - Bal.METRONOME.molasses) * a, Bal.METRONOME.molassesT)
 				"unmaking":
@@ -675,7 +687,7 @@ func _step_rockets(g, dt: float, unit: float) -> void:
 		if k.variant == "impact":
 			for e: SimEnemy in g.enemies:
 				if e.alive and not e.overland and Vector2(e.x - k.x, e.y - k.y).length() < 0.6 + e.radius:
-					_area(g, k.x, k.y, Bal.RAM.impactR, Bal.RAM.impactUnits * unit, false)
+					_area(g, k.x, k.y, Bal.RAM.impactR, Bal.RAM.impactUnits * unit, false, true, "ram_impact")
 					g.events.append({"t": "ramHit", "x": k.x, "y": k.y, "r": Bal.RAM.impactR, "id": k.id})
 					k.alive = false
 					break
@@ -683,7 +695,7 @@ func _step_rockets(g, dt: float, unit: float) -> void:
 			for e: SimEnemy in g.enemies:
 				if e.alive and not k.hit.has(e.id) and Vector2(e.x - k.x, e.y - k.y).length() < 0.7 + e.radius:
 					k.hit[e.id] = true
-					g.damage(e, Bal.RAM.grinderUnits * unit, null, {"single": true})
+					g.damage(e, Bal.RAM.grinderUnits * unit, null, {"single": true, "src": "ram_grinder"})
 					g.events.append({"t": "impact", "x": e.x, "y": e.y, "color": "gold"})
 		if k.alive and (k.travelled >= Bal.RAM.reach or k.d <= 0.0):
 			k.alive = false

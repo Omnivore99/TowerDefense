@@ -23,6 +23,8 @@ const SHAPES := {
 	"c2": [Vector2i(0, 0), Vector2i(1, 0)],
 	"c3": [Vector2i(0, 0), Vector2i(1, 0), Vector2i(2, 0)],
 	"cL": [Vector2i(0, 0), Vector2i(0, 1), Vector2i(1, 1)],
+	## Town Charter (section 12): a MAY USE item placed as a whole macro square.
+	"charter": [Vector2i(0, 0)],
 }
 const FAMILY_OF := {"I": "Bar", "O": "Block", "T": "Tee", "S": "Skew", "Z": "Skew", "J": "Hook", "L": "Hook"}
 const KINDS_OF_FAMILY := {"Hook": ["J", "L"], "Block": ["O"], "Bar": ["I"], "Tee": ["T"], "Skew": ["S", "Z"]}
@@ -30,13 +32,17 @@ const CAP_KINDS: Array[String] = ["c1", "c2", "c3", "cL"]
 
 
 static func is_cap(kind: String) -> bool:
-	return kind.begins_with("c")
+	return CAP_KINDS.has(kind)
+
+
+static func is_charter(p: Variant) -> bool:
+	return p is Dictionary and p.get("kind", "") == "charter"
 
 
 static func family_of(p: Dictionary) -> String:
 	if is_cap(p.kind):
 		return ""
-	return FAMILY_OF[p.kind]
+	return FAMILY_OF.get(p.kind, "")
 
 
 static func make(id: int, kind: String, color: String, glyph: String = "", golden: bool = false) -> Dictionary:

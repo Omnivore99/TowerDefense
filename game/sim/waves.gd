@@ -160,6 +160,20 @@ static func make_wave(seed: int, b: int, i: int, mode: String) -> Dictionary:
 		var boss := spec("boss", dominant, "nautilus", "", "Og", "nonmetal", 4, false, last + 1)
 		boss.boss = true
 		enemies.append(boss)
+	# v2 specials (section 8.4), from their own stream so v1.1 waves stay identical
+	var srng := Rng.new(Rng.sub_seed(seed, [506, b, i]))
+	var avail: Array = []
+	for sp in Bal.SPECIALS_FROM:
+		if b >= Bal.SPECIALS_FROM[sp]:
+			avail.append(sp)
+	if not avail.is_empty():
+		var by_pack := {}
+		for e in enemies:
+			if not by_pack.has(e.pack):
+				by_pack[e.pack] = srng.pick(avail) if srng.chance(Bal.SPECIAL_PACK_CHANCE[b - 1]) else ""
+			if e.size in ["mite", "giant", "champion", "boss"] or e.arch == "balloon":
+				continue
+			e.special = by_pack[e.pack]
 	var bursts: Array[int] = []
 	for e in enemies:
 		while bursts.size() <= e.pack:
@@ -176,4 +190,5 @@ static func make_wave(seed: int, b: int, i: int, mode: String) -> Dictionary:
 	return {
 		"board": b, "index": i, "count": count, "split": split, "enemies": enemies, "bursts": nonzero,
 		"budget": budget, "unitHp": budget / sum_hp, "dominant": dominant,
+		"deploy": Bal.DEPLOY_WAVES[b - 1].has(i),
 	}

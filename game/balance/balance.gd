@@ -231,7 +231,7 @@ const BASE_START_SQUARES := 2
 const HARMONY := 0.2360679774997897
 const GOLDEN_BASE_DAMAGE := 0.08
 
-const BUILDING_IDS: Array[String] = ["lance", "armory", "blastDoor", "beacon", "powerStation", "recycler", "research", "shapeFactory", "harvesterHub", "factory", "missileBattery"]
+const BUILDING_IDS: Array[String] = ["lance", "armory", "blastDoor", "beacon", "powerStation", "recycler", "research", "shapeFactory", "harvesterHub", "commandPost", "missileBattery"]
 const BUILDINGS := {
 	"lance":          {"name": "Resource Lance", "size": 1, "cost": 5, "effect": "Pops pimples anywhere on the map: 2 charges per wave"},
 	"blastDoor":      {"name": "Blast Door", "size": 1, "cost": 5, "effect": "+5 base buffer per board"},
@@ -242,7 +242,7 @@ const BUILDINGS := {
 	"research":       {"name": "Research Tower", "size": 3, "cost": 13, "effect": "+1 tech point per board; every 3rd board, a rare-glyph piece"},
 	"shapeFactory":   {"name": "Shape Factory", "size": 3, "cost": 21, "effect": "Once per wave, choose the next piece family"},
 	"harvesterHub":   {"name": "Harvester Hub", "size": 3, "cost": 13, "effect": "+50% ore from Harvesters"},
-	"factory":        {"name": "Factory", "size": 5, "cost": 34, "effect": "Sends a small tank down the road every 13 s"},
+	"commandPost":    {"name": "Command Post", "size": 5, "cost": 34, "effect": "+1 unit point per supply crate; units +20% HP"},
 	"missileBattery": {"name": "Missile Battery", "size": 5, "cost": 34, "effect": "Base Missile tower, 40-cell range from the core"},
 }
 const BUILDING_FX := {
@@ -397,3 +397,44 @@ const AIRSTRIKE := {"every": 21.0, "radius": 40.0, "len": 13, "width": 3, "units
 const ORBITAL := {"recharge": 55.0, "units": 55.0, "ringUnits": 21.0, "r0": 2.0, "r1": 8.0, "delay": 0.618}
 ## Base ring: kit pads in a ring around the core (section 13).
 const RING := {"inner": 4.5, "outer": 9.5}
+
+# ================================================================ v2.0 milestone 5
+# ---------------------------------------------------------------- specials (section 8.4) [Tune]
+const SPECIALS_FROM := {"raider": 3, "leaper": 4, "sapper": 4, "mirror": 5, "burrower": 6, "cloaked": 6}
+const SPECIAL_PACK_CHANCE: Array[float] = [0.0, 0.0, 0.15, 0.25, 0.3, 0.35, 0.4]
+const SPECIAL_FX := {"sapRange": 6.0, "sapTime": 3.0, "mirrorStun": 1.0, "burrowEvery": 6.0, "burrowTime": 2.0, "cloakRange": 8.0}
+
+# ---------------------------------------------------------------- deployment rounds (section 11) [Tune]
+## Wave numbers that are deployment rounds, per board.
+const DEPLOY_WAVES: Array = [[], [], [], [2], [3], [3, 6], [4, 8, 11]]
+const DEPLOY_POINTS: Array[int] = [3, 3, 4, 5, 6, 8, 10]
+const COMMANDO_CHANCE := 0.125
+const HANGAR := 3
+## Unit stats in board unit-HP terms: hp per member, dps per member (x unitHp / 10 per second).
+const UNITS := {
+	"drones": {"name": "Drone wing", "points": 1, "members": 3, "hp": 2.0, "dps": 4.0, "range": 6.0, "fly": true, "slow": 0.7, "life": 34.0, "speed": 6.0, "block": ""},
+	"rifles": {"name": "Rifle squad", "points": 1, "members": 5, "hp": 3.0, "dps": 3.0, "range": 8.0, "fly": false, "speed": 2.2, "block": "small"},
+	"tank": {"name": "Tank", "points": 2, "members": 1, "hp": 21.0, "dps": 18.0, "range": 10.0, "splash": 1.5, "fly": false, "speed": 2.5, "block": "medium"},
+	"engineer": {"name": "Engineer", "points": 1, "members": 1, "hp": 4.0, "dps": 0.0, "range": 6.0, "fly": false, "speed": 3.0, "block": "", "repair": 2.0, "sandbag": 8.0},
+	"commando": {"name": "Commando", "points": 3, "members": 1, "hp": 6.0, "dps": 2.0, "range": 9.0, "fly": false, "speed": 3.2, "block": "", "every": 12.0, "execute": 0.3, "disable": 8.0},
+	"sandbag": {"name": "Sandbags", "points": 0, "members": 1, "hp": 8.0, "dps": 0.0, "range": 0.0, "fly": false, "speed": 0.0, "block": "large"},
+}
+const UNIT_BLOCK_RANK := {"mite": 0, "small": 1, "medium": 2, "large": 3, "giant": 4, "champion": 9, "boss": 9}
+
+# ---------------------------------------------------------------- towns (section 12) [Tune]
+const TOWN := {
+	"divert": 0.3, "reach": 13.0, "hp": 34.0, "hpPerLevel": 21.0, "wallsHp": 34.0, "housing": 3, "housingPerLevel": 2, "barracksHousing": 3,
+	"granary": 0.5, "workshop": 0.2, "market": 3.0, "prodRange": 13.0,
+}
+const TOWN_LEVELS: Array[String] = ["Hamlet", "Village", "Town", "City", "Citadel"]
+## Cost to reach level 2..5.
+const TOWN_LEVEL_COST: Array = [{"timber": 13.0, "water": 8.0}, {"timber": 21.0, "water": 13.0, "ore": 8.0}, {"timber": 34.0, "water": 21.0, "ore": 13.0}, {"timber": 55.0, "water": 34.0, "ore": 21.0}]
+const DISTRICTS := {
+	"granary": {"name": "Granary", "effect": "+50% town production"},
+	"barracks": {"name": "Barracks", "effect": "+3 unit housing; a free Rifle squad on deployment waves"},
+	"workshop": {"name": "Workshop", "effect": "-20% Ore and Timber on traps; 1 Landmine per wave"},
+	"walls": {"name": "Walls", "effect": "+34 town HP and a gate turret"},
+	"market": {"name": "Market", "effect": "convert resources 3 : 1, once per wave"},
+}
+const CHARTER_COSTS: Array = [{"timber": 21.0, "essence": 13.0}, {"timber": 34.0, "essence": 21.0}, {"timber": 55.0, "essence": 34.0}]
+const COMMAND_POST := {"points": 1, "hp": 0.2}

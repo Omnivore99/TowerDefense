@@ -42,6 +42,8 @@ var tech := ""
 var aura_mult := 1.0
 var evo_t := 99.0
 var fire_drop_t := 0.0
+## Stunned by a Mirror shell's reflected beam (section 8.4).
+var stun_t := 0.0
 
 
 func ground_count() -> int:

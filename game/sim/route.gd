@@ -10,6 +10,8 @@ var length: float = 0.0
 var corners: PackedFloat64Array = PackedFloat64Array()
 ## Town spur routes end at a town gate instead of the core (section 12).
 var town_id: int = 0
+## Town spurs leaving this route: [{town, route: Route, d}] (d = distance of the junction).
+var diverts: Array = []
 
 
 static func make(ingress_idx: int, points: PackedVector2Array) -> Route:

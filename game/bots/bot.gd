@@ -8,7 +8,7 @@ const SKILLS := {
 	"expert": {"waste": 0.0, "colour": 0.7, "stack": 0.3, "spot": "spiral", "maxMass": 8, "holes": false},
 }
 const WEAK := {"hearts": "green", "clubs": "red", "diamonds": "blue", "spades": "gold"}
-const BUILD_PRIORITY: Array[String] = ["lance", "armory", "blastDoor", "beacon", "powerStation", "harvesterHub", "missileBattery", "research", "recycler", "factory", "shapeFactory"]
+const BUILD_PRIORITY: Array[String] = ["lance", "armory", "blastDoor", "beacon", "powerStation", "harvesterHub", "missileBattery", "research", "recycler", "commandPost", "shapeFactory"]
 
 var game: Game
 var skill: String
@@ -53,6 +53,9 @@ func act() -> void:
 	_strike()
 	_pop()
 	_arsenal()
+	_deploy()
+	if g.phase == "calm":
+		_towns()
 	var src := _next_source()
 	if not src.is_empty():
 		_place_one(src)
@@ -63,11 +66,13 @@ func act() -> void:
 
 func _next_source() -> Dictionary:
 	var g := game
+	if not g.can_place_pieces():
+		return {}
 	if not g.must.is_empty():
 		return {"zone": "must", "index": 0}
 	var i := -1
 	for k in g.may.size():
-		if g.may[k] != null:
+		if g.may[k] != null and (g.phase == "calm" or not Pieces.is_charter(g.may[k])):
 			i = k
 			break
 	if i >= 0:
@@ -146,6 +151,9 @@ func _place_one(src: Dictionary) -> void:
 	var g := game
 	var piece: Dictionary = g.get_piece(src)
 	var cfg: Dictionary = SKILLS[skill]
+	if Pieces.is_charter(piece):
+		_found_town(src)
+		return
 	if rng.chance(cfg.waste):
 		g.discard(src)
 		return
@@ -203,6 +211,84 @@ func _place_one(src: Dictionary) -> void:
 
 ## Pop pimples with the Lance: experts wait for ripeness, average bots pop anything worth
 ## at least 60%, novices never pop.
+# ------------------------------------------------------------ towns and units (M5)
+## Pick the free macro square with the most resource cells nearby (novices take the first legal one).
+func _found_town(src: Dictionary) -> void:
+	var g := game
+	var best := {}
+	var best_s := -1.0
+	for my in Bal.MACRO_H:
+		for mx in Bal.MACRO_W:
+			var cx := mx * Bal.MACRO + Bal.MACRO / 2
+			var cy := my * Bal.MACRO + Bal.MACRO / 2
+			var pv := g.preview(g.get_piece(src), 0, false, cx, cy)
+			if not pv.ok:
+				continue
+			var sc := 1.0
+			if skill != "novice":
+				var t := {"x": cx, "y": cy, "level": 1, "districts": ["", "", "", ""]}
+				var prod := g.towns.production(g, t)
+				sc += prod.ore + prod.timber * 1.3 + prod.water * 1.3
+			if sc > best_s:
+				best_s = sc
+				best = {"x": cx, "y": cy}
+			if skill == "novice":
+				break
+		if skill == "novice" and not best.is_empty():
+			break
+	if best.is_empty():
+		g.discard(src)
+		return
+	g.place(src, 0, false, best.x, best.y)
+
+
+const DISTRICT_ORDER: Array[String] = ["granary", "walls", "barracks", "workshop", "market"]
+
+
+func _towns() -> void:
+	var g := game
+	for t in g.towns.list:
+		if t.fallen:
+			g.rebuild_town(t.id)
+			continue
+		if t.level >= 5:
+			continue
+		var c: Dictionary = g.towns.level_cost(t)
+		var spare := {}
+		for k in c:
+			spare[k] = float(c[k]) + (0.0 if skill == "expert" else 8.0)
+		if not Evolve.can_afford(g.base, spare):
+			continue
+		var pick := ""
+		for d in DISTRICT_ORDER:
+			if not t.districts.has(d):
+				pick = d
+				break
+		if pick == "":
+			pick = "granary"
+		g.level_town(t.id, pick)
+	if skill == "expert" and g.has_building("armory") and g.towns.list.size() < g.towns.max_towns(g.board_no):
+		var cc := g.charter_cost()
+		var keep := {}
+		for k in cc:
+			keep[k] = float(cc[k]) * 1.5
+		if Evolve.can_afford(g.base, keep) and not g.may.any(func(p): return Pieces.is_charter(p)):
+			g.buy_charter()
+
+
+## Deploy units from the pool onto the road, a bit ahead of where the monsters arrive.
+func _deploy() -> void:
+	var g := game
+	if g.phase != "wave" or g.deploy.pool.is_empty() or g.board.routes.is_empty():
+		return
+	var kind: String = g.deploy.pool[0]
+	var r: Route = g.board.routes[rng.int_range(0, g.board.routes.size() - 1)]
+	var frac := rng.range_f(0.2, 0.9) if skill == "novice" else (0.75 if kind == "engineer" else rng.range_f(0.45, 0.7))
+	var p := r.at(r.length * frac)
+	var order := "advance" if (kind == "tank" and skill == "expert") else "hold"
+	g.deploy_unit(0, p.x, p.y, order)
+
+
 func _pop() -> void:
 	var g := game
 	if skill == "novice" or g.eco.charges() <= 0:

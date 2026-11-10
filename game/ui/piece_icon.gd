@@ -17,6 +17,9 @@ func _draw() -> void:
 	var sz := size
 	if piece == null:
 		return
+	if Pieces.is_charter(piece):
+		_draw_charter(sz)
+		return
 	var cells := Pieces.orient_cells(piece.kind, 0, false)
 	var w := 0
 	var h := 0
@@ -40,3 +43,17 @@ func _draw() -> void:
 	if piece.glyph != "":
 		var gc := Color(0.7, 0.9, 1.0) if Pieces.RARE_GLYPHS.has(piece.glyph) else Color(1, 0.95, 0.75)
 		draw_circle(Vector2(ox + cs * 0.5, oy + cs * 0.5), cs * 0.22, gc)
+
+
+## Town Charter: a rolled parchment with a wax seal and a little roof.
+func _draw_charter(sz: Vector2) -> void:
+	var c := sz / 2.0
+	var paper := Color(0.93, 0.84, 0.62).darkened(0.5 if dim else 0.0)
+	var r := Rect2(c - Vector2(20, 13), Vector2(40, 26))
+	draw_rect(r, paper)
+	draw_rect(Rect2(r.position - Vector2(3, 2), Vector2(6, 30)), paper.darkened(0.2))
+	draw_rect(Rect2(r.end - Vector2(3, 28), Vector2(6, 30)), paper.darkened(0.2))
+	var roof := PackedVector2Array([c + Vector2(-9, 1), c + Vector2(0, -8), c + Vector2(9, 1)])
+	draw_colored_polygon(roof, Color(0.45, 0.25, 0.18))
+	draw_rect(Rect2(c + Vector2(-6, 1), Vector2(12, 7)), Color(0.35, 0.3, 0.28))
+	draw_circle(c + Vector2(13, 9), 4.5, Color(0.75, 0.12, 0.1))

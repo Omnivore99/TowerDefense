@@ -43,6 +43,9 @@ var setall_btn: Button
 var evolve_btn: Button
 var _card_tower := 0
 var _kit_sig := ""
+var unit_box: HFlowContainer
+var unit_title: Label
+var _unit_sig := ""
 const KIT_SHORT := {
 	"landmine": "Mine", "spike": "Spikes", "betty": "Betty", "claymore": "Claymore", "tar": "Tar pit",
 	"metronome_decay": "Decay ♪", "metronome_thunder": "Thunder ♪", "metronome_molasses": "Molasses ♪", "metronome_unmaking": "Unmake ♪",
@@ -283,6 +286,15 @@ func _build_left() -> void:
 	air_btn.text = "Air (X)"
 	air_btn.pressed.connect(func(): w.begin_strike("airstrike"))
 	sh.add_child(air_btn)
+	_section(vb, "UNITS (N)")
+	unit_title = vb.get_child(vb.get_child_count() - 1) as Label
+	unit_box = HFlowContainer.new()
+	unit_box.custom_minimum_size = Vector2(190, 0)
+	vb.add_child(unit_box)
+	var rb := Button.new()
+	rb.text = "Damage report (J)"
+	rb.pressed.connect(func(): w.open_report())
+	vb.add_child(rb)
 
 
 func _build_card() -> void:
@@ -378,6 +390,21 @@ func refresh(g: Game) -> void:
 		orbital_btn.disabled = not g.can_orbital()
 		air_btn.visible = not g.arsenal.airstrike_pad().is_empty()
 		air_btn.disabled = not g.can_airstrike()
+	var usig := "%s|%d|%s" % [str(g.deploy.pool), w.unit_slot, w.unit_order]
+	if usig != _unit_sig:
+		_unit_sig = usig
+		for c in unit_box.get_children():
+			c.queue_free()
+		for i in g.deploy.pool.size():
+			var kind: String = g.deploy.pool[i]
+			var b := Button.new()
+			b.text = {"drones": "Drones", "rifles": "Rifles", "tank": "Tank", "engineer": "Engineer", "commando": "Commando"}.get(kind, kind)
+			b.tooltip_text = "%s · %s" % [Bal.UNITS[kind].name, "click, then click the road · Tab: Hold / Advance"]
+			b.add_theme_font_size_override("font_size", 12)
+			b.modulate = Color(1.25, 1.1, 0.85) if w.unit_slot == i else Color.WHITE
+			b.pressed.connect(func(): w.select_unit(i))
+			unit_box.add_child(b)
+		unit_title.text = "UNITS (N) · %d/%d housed%s" % [g.deploy.pool.size(), g.deploy.capacity(g), " · " + w.unit_order.capitalize() if w.unit_slot >= 0 else ""]
 	var nw := g.next_wave_preview()
 	if g.phase == "calm" and not nw.is_empty():
 		var counts := {}
@@ -387,9 +414,9 @@ func refresh(g: Game) -> void:
 		for s in ["mite", "small", "medium", "large", "giant", "champion", "boss"]:
 			if counts.has(s):
 				parts.append("%d %s" % [counts[s], s])
-		preview_label.text = "[color=#8a93a6]Next:[/color] %s  [color=#8a93a6]· mostly %s[/color]" % [", ".join(parts), Waves.SUIT_SYMBOL[nw.dominant]]
+		preview_label.text = "[color=#8a93a6]Next:[/color] %s  [color=#8a93a6]· mostly %s[/color]%s" % [", ".join(parts), Waves.SUIT_SYMBOL[nw.dominant], "\n[color=#ffcf6b]Deployment round: no pieces, a crate of units instead[/color]" if nw.get("deploy", false) else ""]
 	elif g.phase == "wave":
-		preview_label.text = "[color=#8a93a6]%d monsters on the road[/color]" % g.enemies.size()
+		preview_label.text = "[color=#8a93a6]%d monsters on the road[/color]%s" % [g.enemies.size(), "  [color=#ffcf6b]· deployment round[/color]" if g.is_deploy_round() else ""]
 	else:
 		preview_label.text = ""
 	ready_btn.disabled = g.phase != "calm"
@@ -435,6 +462,9 @@ func _set_slot(b: Button, p: Variant, locked: bool, selected: bool) -> void:
 	icon.set_piece(p, locked)
 	b.disabled = p == null
 	b.modulate = Color(1.25, 1.1, 0.85) if selected else Color.WHITE
+	if Pieces.is_charter(p):
+		b.tooltip_text = "Town Charter: place it on a free square near a road to found a town (between waves)"
+		return
 	if p != null:
 		var fam := Pieces.family_of(p)
 		var tip := ("Cap (%s)" % p.kind) if fam == "" else fam

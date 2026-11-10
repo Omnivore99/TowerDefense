@@ -278,6 +278,9 @@ func resource_of(node: String) -> String:
 func end_wave(rng: Rng) -> Dictionary:
 	var gained := {"ore": 0.0, "timber": 0.0, "water": 0.0}
 	for h in g.harvesters:
+		if h.get("sapped", false):
+			h.erase("sapped")
+			continue
 		var out := output(h)
 		if out <= 0.0:
 			continue
@@ -409,6 +412,12 @@ func _free_neighbours(cells: Array) -> Array:
 			if not out.has(i):
 				out.append(i)
 	return out
+
+
+## A Sapper reached a pimple: it is spoiled (no reward) and leaves a crater.
+func spoil(p: Dictionary) -> void:
+	pimples.erase(p)
+	_crater(p.cell)
 
 
 func _crater(cell: int) -> void:

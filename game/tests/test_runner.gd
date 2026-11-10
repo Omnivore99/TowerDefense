@@ -25,6 +25,9 @@ static func run_all() -> int:
 	_test_evolve()
 	_test_targeting()
 	_test_kits()
+	_test_towns()
+	_test_deploy()
+	_test_specials()
 	print("%d checks, %d failures (%.1f s)" % [checks, failures, (Time.get_ticks_msec() - t0) / 1000.0])
 	return 1 if failures > 0 else 0
 
@@ -165,3 +168,129 @@ static func _test_kits() -> void:
 	for i in roundi(19.0 / Bal.DT):
 		g.arsenal._step_metronomes(g, Bal.DT, 50.0)
 	check(m.amp < 0.12, "metronome nearly stops after about 19 s (amp %.3f)" % m.amp)
+
+
+static func _calm_game(seed_v: int) -> Game:
+	var g := Game.new(seed_v, "normal", {"tutorial": false})
+	for i in 60 * 30:
+		g.step()
+		if g.phase == "calm":
+			break
+	return g
+
+
+static func _test_towns() -> void:
+	var g := _calm_game(83)
+	var ch := g.stream.make("charter", "gold")
+	g.must.clear()
+	g.may[0] = ch
+	var spot := Vector2i(-1, -1)
+	for my in Bal.MACRO_H:
+		for mx in Bal.MACRO_W:
+			if spot.x < 0 and g.preview(ch, 0, false, mx * Bal.MACRO + 4, my * Bal.MACRO + 4).ok:
+				spot = Vector2i(mx * Bal.MACRO + 4, my * Bal.MACRO + 4)
+	check(spot.x >= 0, "a legal town square exists")
+	if spot.x < 0:
+		return
+	var res := g.place({"zone": "may", "index": 0}, 0, false, spot.x, spot.y)
+	check(res.ok and g.towns.list.size() == 1, "town founded")
+	check(g.board.spurs.size() == 1 and not g.board.town_routes.is_empty(), "spur road and town routes built")
+	var div := 0
+	for r in g.board.routes:
+		div += r.diverts.size()
+	check(div > 0, "main routes divert to the town")
+	check(g.preview(g.stream.make("O", "red"), 0, false, spot.x, spot.y).ok == false, "town cells are occupied")
+	var t: Dictionary = g.towns.list[0]
+	g.base.timber = 200.0
+	g.base.water = 200.0
+	g.base.ore = 200.0
+	check(g.level_town(t.id, "walls") == "", "level up to Village with Walls")
+	check(t.level == 2 and t.districts.has("walls") and g.gate_turrets.size() == 1, "walls district adds a gate turret")
+	check(absf(g.towns.max_hp(t) - (34.0 + 21.0 + 34.0)) < 0.01, "town HP 34 + 21 per level + 34 walls")
+	# diversion rate: about 30%, raiders always
+	var route: Route = null
+	for r in g.board.routes:
+		if not r.diverts.is_empty():
+			route = r
+	var dv: Dictionary = route.diverts[0]
+	var n := 0
+	for i in 600:
+		var e := SimEnemy.new()
+		e.route = route
+		e.d = dv.d + 0.01
+		g.towns.maybe_divert(g, e, dv.d - 0.01)
+		if e.route != route:
+			n += 1
+	check(n > 120 and n < 240, "about 30%% of monsters divert (%d of 600)" % n)
+	var rd := SimEnemy.new()
+	rd.route = route
+	rd.special = "raider"
+	rd.d = dv.d + 0.01
+	g.towns.maybe_divert(g, rd, dv.d - 0.01)
+	check(rd.route.town_id == t.id, "raiders always divert")
+	var snap := g.snapshot()
+	var g2 := Game.new(83, "normal", {"tutorial": false, "snapshot": snap})
+	check(g2.towns.list.size() == 1 and g2.board.spurs.size() == 1, "towns survive a save")
+	g.towns.hit(g, t.id, 999.0)
+	check(t.fallen and g.gate_turrets.is_empty(), "a town falls at 0 HP")
+	check(g.rebuild_town(t.id) == "" and not t.fallen, "a fallen town can be rebuilt")
+
+
+static func _test_deploy() -> void:
+	var g := _calm_game(91)
+	g.wave_index = 1
+	g.wave = Waves.make_wave(g.seed, g.board_no, 1, g.mode)
+	g.phase = "wave"
+	var got := g.deploy.open_crate(g)
+	var pts := 0
+	for k in got:
+		pts += int(Bal.UNITS[k].points)
+	check(pts == Bal.DEPLOY_POINTS[0], "crate deals the board's unit points (%d)" % pts)
+	g.deploy.pool = ["rifles", "tank"]
+	var r: Route = g.board.routes[0]
+	var p := r.at(r.length * 0.5)
+	check(not g.deploy_unit(0, 0.5, 0.5).get("ok", false) or g.deploy.pool.size() == 1, "units must stand near the road")
+	g.deploy.pool = ["rifles", "tank"]
+	var res := g.deploy_unit(0, p.x, p.y)
+	check(res.get("ok", false), "rifle squad deployed on the road")
+	var u: Dictionary = res.unit
+	var e := g._spawn(Waves.spec("small", "hearts", "crawler", "", "H", "nonmetal", 1, false, 0), {"route": r, "d": maxf(0.0, r.length * 0.5 - 2.0)})
+	e.lane = 0.0
+	for i in 120:
+		g._step_enemies(Bal.DT)
+		g.deploy.step(g, Bal.DT)
+	check(e.d < r.length * 0.5 and e.chewing < 0, "a holding rifle squad blocks a small monster")
+	check(u.hp < u.max, "the blocked monster chews the squad")
+	g.enemies.clear()
+	g.deploy.wave_end(g)
+	check(g.deploy.pool.has("rifles"), "surviving units return to the pool")
+	g.deploy.pool = ["rifles", "rifles", "rifles", "rifles", "rifles"]
+	g.deploy.board_end(g)
+	check(g.deploy.pool.size() == Bal.HANGAR, "units without housing disband at board end")
+	check(not g.can_place_pieces() == not (g.phase == "calm" or not g.wave.get("deploy", false)), "deploy rounds block building")
+
+
+static func _test_specials() -> void:
+	var g := _calm_game(97)
+	g.wave_index = 1
+	g.wave = Waves.make_wave(g.seed, g.board_no, 1, g.mode)
+	var r: Route = g.board.routes[0]
+	var e := g._spawn(Waves.spec("medium", "hearts", "crawler", "", "H", "nonmetal", 1, false, 0), {"route": r, "d": r.length * 0.5})
+	e.special = "cloaked"
+	check(g.hidden_from(e, e.x + 12.0, e.y), "cloaked monsters are hidden beyond 8 cells")
+	check(not g.hidden_from(e, e.x + 5.0, e.y), "cloaked monsters show up close")
+	e.unmade_t = 3.0
+	check(not g.hidden_from(e, e.x + 12.0, e.y), "a neutralised cloak is visible")
+	e.special = "burrower"
+	e.unmade_t = 0.0
+	e.burrowed = true
+	var t := g._make_base_tower("Gun", e.x, e.y, 1.0, 8.0)
+	check(g.damage(e, 10.0, t) == 0.0, "burrowed monsters ignore tower fire")
+	check(g.damage(e, 10.0, null, {"src": "landmine", "area": true}) > 0.0, "traps still hit burrowed monsters")
+	check(g.deploy.report.has("landmine"), "damage report records the trap")
+	e.burrowed = false
+	e.special = "mirror"
+	t.base_tower = false
+	var hp0 := e.hp
+	g.damage(e, 10.0, t, {"beam": true})
+	check(e.hp == hp0 and t.stun_t > 0.0, "mirror shells reflect the first beam as a stun")

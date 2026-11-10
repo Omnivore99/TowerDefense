@@ -60,8 +60,20 @@ var vuln := 0.0
 var vuln_t := 0.0
 var unmade_t := 0.0
 var tarred := 0.0
-## Damage bookkeeping for the damage report: source key -> damage.
 var leaked := false
+## v2 specials state (section 8.4).
+var burrowed := false
+var burrow_t := 0.0
+var leap_t := 0.0
+var leapt := {}
+var sap: Dictionary = {}
+var sap_done := false
+var mirror_used := false
+
+
+## A special is active unless a Commando or an Unmaking metronome switched it off.
+func special_on() -> bool:
+	return special != "" and unmade_t <= 0.0
 
 
 func threat() -> float:

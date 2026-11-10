@@ -20,6 +20,9 @@ var ore := PackedInt32Array()
 var veins: Array[Vector2i] = []
 var paths: Array = []
 var routes: Array[Route] = []
+## Town spur roads (section 12): {town, path: [junction macro, ..., town macro]}.
+var spurs: Array = []
+var town_routes: Array[Route] = []
 ## The road being struck in this board (shown by the reveal), or {}.
 var pending: Dictionary = {}
 var pending_cells: Array[int] = []
@@ -100,7 +103,10 @@ func serialize() -> Dictionary:
 	var vs: Array = []
 	for v in veins:
 		vs.append([v.x, v.y])
-	return {"seed": seed, "height": Array(height), "ore": Array(ore), "veins": vs, "paths": ps, "cost": Array(cost)}
+	var sp: Array = []
+	for x in spurs:
+		sp.append({"town": x.town, "path": Array(x.path)})
+	return {"seed": seed, "height": Array(height), "ore": Array(ore), "veins": vs, "paths": ps, "cost": Array(cost), "spurs": sp}
 
 
 func _load(d: Dictionary) -> void:
@@ -113,6 +119,12 @@ func _load(d: Dictionary) -> void:
 	for p in d.paths:
 		paths.append(_path_from_json(p))
 	cost = PackedFloat32Array(d.cost)
+	spurs.clear()
+	for x in d.get("spurs", []):
+		var path: Array[int] = []
+		for m in x.path:
+			path.append(int(m))
+		spurs.append({"town": int(x.town), "path": path})
 
 
 static func _path_to_json(p: Dictionary) -> Dictionary:
@@ -445,6 +457,38 @@ func plan_road(b: int, blocked: Callable) -> Dictionary:
 	return fallback
 
 
+## Cells covered by a spur road (junction centre to town centre).
+func spur_cells(path: Array) -> Array[int]:
+	var out := {}
+	for i in path.size() - 1:
+		for cell in seg_cells(macro_centre(path[i]), macro_centre(path[i + 1])):
+			out[cell] = true
+	var arr: Array[int] = []
+	for k in out:
+		arr.append(k)
+	return arr
+
+
+func is_road_macro(m: int) -> bool:
+	for p in paths:
+		if p.path.has(m):
+			return true
+	for sp in spurs:
+		if sp.path.has(m):
+			return true
+	return false
+
+
+func add_spur(town_id: int, path: Array[int], occupied: Callable = Callable()) -> void:
+	spurs.append({"town": town_id, "path": path})
+	rebuild_road(occupied)
+
+
+func remove_spur(town_id: int, occupied: Callable = Callable()) -> void:
+	spurs = spurs.filter(func(x): return x.town != town_id)
+	rebuild_road(occupied)
+
+
 ## Cells covered by a path.
 func cells_of(p: Dictionary) -> Array[int]:
 	var out := {}
@@ -515,6 +559,9 @@ func rebuild_road(occupied: Callable = Callable()) -> void:
 	for p in paths:
 		for cell in cells_of(p):
 			road[cell] = 1
+	for sp in spurs:
+		for cell in spur_cells(sp.path):
+			road[cell] = 1
 	for y in GH:
 		for x in GW:
 			var i := cell_idx(x, y)
@@ -553,6 +600,27 @@ func _build_routes() -> void:
 			for m in macros:
 				pts.append(macro_centre(m))
 			routes.append(Route.make(ingress, pts))
+	# town spurs: a diverted copy of each route that passes the junction
+	town_routes.clear()
+	for sp in spurs:
+		var j := macro_centre(sp.path[0])
+		for r in routes:
+			var k := -1
+			for i in r.pts.size():
+				if r.pts[i].distance_to(j) < 0.01:
+					k = i
+					break
+			if k < 0:
+				continue
+			var tp := PackedVector2Array()
+			for i in k + 1:
+				tp.append(r.pts[i])
+			for i in range(1, sp.path.size()):
+				tp.append(macro_centre(sp.path[i]))
+			var tr := Route.make(r.ingress, tp)
+			tr.town_id = sp.town
+			town_routes.append(tr)
+			r.diverts.append({"town": sp.town, "route": tr, "d": r.cum[k]})
 
 
 func _dfs(c: int, acc: Array, seen: Dictionary, nxt: Dictionary, found: Array) -> void:
