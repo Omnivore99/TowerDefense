@@ -96,6 +96,13 @@ void fragment(){
 	} else if (kind > 3.5 && kind < 4.5) {
 		// scorched road under the strike (cools over time)
 		col = vec3(0.14, 0.12, 0.12);
+	} else if (kind > 4.5 && kind < 5.5) {
+		// lake bed / wet mud
+		col = mix(vec3(0.20, 0.17, 0.14), vec3(0.27, 0.23, 0.18), n2);
+		rough = 0.35;
+	} else if (kind > 5.5 && kind < 6.5) {
+		// forest floor: darker moss with needle litter
+		col = mix(vec3(0.19, 0.25, 0.15), vec3(0.27, 0.24, 0.17), vnoise(wpos.xz * 2.3));
 	}
 	// cliffs: darker stone faces
 	if (abs(wn.y) < 0.5) { col = vec3(0.30, 0.31, 0.36) * (0.75 + 0.35 * vnoise(vec2(wpos.x + wpos.z, wpos.y * 3.0) * 2.0)); rough = 0.9; }

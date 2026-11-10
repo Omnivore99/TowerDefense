@@ -290,7 +290,12 @@ func refresh(g: Game) -> void:
 	top_label.text = "[b]%s[/b]  [color=#8a93a6]%s · %s[/color]" % [wave_txt, Bal.MODES[g.mode].name, phase_txt]
 	integrity_bar.value = maxi(0, g.integrity)
 	var buf := " +%d" % g.buffer if g.buffer > 0 else ""
-	res_label.text = "[color=#ffcf6b]◆ %d[/color] Essence   [color=#d9a36b]⬢ %d[/color] Ore   [color=#8a93a6]%d/%d%s[/color]" % [int(g.base.essence), int(g.base.ore), maxi(0, g.integrity), Bal.BASE_INTEGRITY, buf]
+	var lance := ""
+	if g.eco.lance_level() > 0:
+		lance = "   [color=#f2efe6]➶ %d/%d[/color]" % [g.eco.charges(), g.eco.lance_charges_max()]
+	var pearls := "   [color=#e8f4ff]● %d[/color]" % g.base.pearls if g.base.pearls > 0 else ""
+	res_label.text = "[color=#ffcf6b]◆ %d[/color]   [color=#f08c40]⬢ %d[/color]   [color=#e0b060]▮ %d[/color]   [color=#8cd8ff]≈ %d[/color]%s%s   [color=#8a93a6]%d/%d%s[/color]" % [int(g.base.essence), int(g.base.ore), int(g.base.timber), int(g.base.water), pearls, lance, maxi(0, g.integrity), Bal.BASE_INTEGRITY, buf]
+	res_label.tooltip_text = "Essence, Ore, Timber, Water, Pearls, Lance charges, base integrity"
 	var nw := g.next_wave_preview()
 	if g.phase == "calm" and not nw.is_empty():
 		var counts := {}

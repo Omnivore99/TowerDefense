@@ -8,7 +8,7 @@ const SKILLS := {
 	"expert": {"waste": 0.0, "colour": 0.7, "stack": 0.3, "spot": "spiral", "maxMass": 8, "holes": false},
 }
 const WEAK := {"hearts": "green", "clubs": "red", "diamonds": "blue", "spades": "gold"}
-const BUILD_PRIORITY: Array[String] = ["blastDoor", "beacon", "powerStation", "harvesterHub", "missileBattery", "research", "recycler", "factory", "smite", "shapeFactory"]
+const BUILD_PRIORITY: Array[String] = ["lance", "blastDoor", "beacon", "powerStation", "harvesterHub", "missileBattery", "research", "recycler", "factory", "smite", "shapeFactory"]
 
 var game: Game
 var skill: String
@@ -52,6 +52,7 @@ func act() -> void:
 	cooldown = 30 if skill == "novice" else 12
 	if g.can_smite():
 		_smite()
+	_pop()
 	var src := _next_source()
 	if not src.is_empty():
 		_place_one(src)
@@ -198,8 +199,48 @@ func _place_one(src: Dictionary) -> void:
 	g.discard(src)
 
 
+## Pop pimples with the Lance: experts wait for ripeness, average bots pop anything worth
+## at least 60%, novices never pop.
+func _pop() -> void:
+	var g := game
+	if skill == "novice" or g.eco.charges() <= 0:
+		return
+	var min_frac := 0.99 if skill == "expert" else 0.6
+	for p in g.eco.pimples:
+		var st: String = g.eco.stage(p)
+		var last_chance: bool = st == "turning"
+		if g.eco.value_frac(p) >= min_frac or (last_chance and skill == "expert"):
+			g.pop_pimple(p.id)
+			return
+
+
 func _harvest(src: Dictionary, piece: Dictionary) -> bool:
 	var g := game
+	# forests and lake shores first when we have few of those structures
+	var have := {"ore": 0, "forest": 0, "lake": 0}
+	for h in g.harvesters:
+		have[h.get("node", "ore")] += 1
+	var targets: Array[Vector2i] = []
+	if have.forest <= have.lake:
+		for f in g.eco.forests:
+			if not f.cells.is_empty():
+				targets.append(Vector2i(f.cells[f.cells.size() / 2] % Bal.GRID_W, f.cells[f.cells.size() / 2] / Bal.GRID_W))
+	for l in g.eco.lakes:
+		if l.units > 0.0 and not l.cells.is_empty():
+			var c: int = l.cells[0]
+			targets.append(Vector2i(c % Bal.GRID_W, c / Bal.GRID_W - 1))
+	if have.forest > have.lake:
+		for f in g.eco.forests:
+			if not f.cells.is_empty():
+				targets.append(Vector2i(f.cells[0] % Bal.GRID_W, f.cells[0] / Bal.GRID_W))
+	if have.ore >= 2:
+		for tc in targets:
+			for o in orients:
+				for d in [Vector2i(0, 0), Vector2i(-1, 0), Vector2i(0, -1), Vector2i(1, 0)]:
+					var pv := g.preview(piece, o.rot, o.mirror, tc.x + d.x, tc.y + d.y)
+					if pv.ok and pv.kind == "harvester":
+						if g.place(src, o.rot, o.mirror, tc.x + d.x, tc.y + d.y).ok:
+							return true
 	for v in g.board.veins:
 		for o in orients:
 			for dy in 3:

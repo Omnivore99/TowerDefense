@@ -52,6 +52,15 @@ const REVEAL_SECONDS := 3.0
 const REVEAL_STRIKE_SECONDS := 1.8
 const TERRAIN := {"featuresPerMacro": [0, 0, 0, 1, 1, 2], "blobSizes": [2, 3, 5], "rise": [1, 3], "valley": [-2, -1]}
 const ORE := {"min": 4, "max": 5, "size": 3, "perNewRoad": 2}
+## v2.0 economy (sections 5.1, 6). [Tune]
+const FOREST := {"perNewRoad": 2, "side": [4, 6], "trees": [13, 34], "perCell": 1.0, "timberPerTree": 3.0, "regrowEvery": 2}
+const LAKE := {"perNewRoad": 1, "side": [5, 8], "units": [34, 89], "perShoreCell": 2, "refill": 0.34}
+## Pimples: one sprouts every `every` waves per structure, `cap` alive at once; V = valueMult x per-wave output (min minValue).
+const PIMPLE := {"every": 2, "cap": 2, "pearlChance": 0.3333, "minValue": 8.0, "valueMult": 3.0, "craterCool": 3}
+## Resource Lance (D2): charges per wave by level, upgrade costs to level 2, 3, 4.
+const LANCE := {"charges": [2, 3, 4, 5], "upgrade": [8, 13, 21]}
+## Ore converts to Essence at a poor rate (section 6.1; the Market district in M5).
+const ORE_TO_ESSENCE := 3.0
 
 # ---------------------------------------------------------------- pieces
 const PIECE_WEIGHTS := {"I": 1.0, "O": 1.0, "T": 1.1, "S": 0.55, "Z": 0.55, "J": 0.55, "L": 0.55}
@@ -222,8 +231,9 @@ const BASE_START_SQUARES := 2
 const HARMONY := 0.2360679774997897
 const GOLDEN_BASE_DAMAGE := 0.08
 
-const BUILDING_IDS: Array[String] = ["blastDoor", "beacon", "powerStation", "recycler", "research", "shapeFactory", "harvesterHub", "factory", "missileBattery", "smite"]
+const BUILDING_IDS: Array[String] = ["lance", "blastDoor", "beacon", "powerStation", "recycler", "research", "shapeFactory", "harvesterHub", "factory", "missileBattery", "smite"]
 const BUILDINGS := {
+	"lance":          {"name": "Resource Lance", "size": 1, "cost": 5, "effect": "Pops pimples anywhere on the map: 2 charges per wave"},
 	"blastDoor":      {"name": "Blast Door", "size": 1, "cost": 5, "effect": "+5 base buffer per board"},
 	"beacon":         {"name": "Beacon", "size": 1, "cost": 5, "effect": "+1 MAY USE slot"},
 	"powerStation":   {"name": "Power Station", "size": 2, "cost": 8, "effect": "+10% damage for Laser, Pulsar, Lightning, E-Field"},

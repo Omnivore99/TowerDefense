@@ -77,12 +77,14 @@ var events: Array = []
 var combat: Rng
 var wave_rng: Rng
 var _tower_index := {}
+var eco: Economy
 
 
 func _init(seed_value: int, mode_id: String = "normal", opts: Dictionary = {}) -> void:
 	seed = seed_value & 0xFFFFFFFF
 	mode = mode_id
 	base = new_base()
+	eco = Economy.new(self)
 	tutorial_enabled = opts.get("tutorial", true)
 	tower_at.resize(Bal.GRID_W * Bal.GRID_H)
 	obj_at.resize(Bal.GRID_W * Bal.GRID_H)
@@ -100,7 +102,7 @@ static func new_base() -> Dictionary:
 	var b := []
 	for _s in Bal.BASE_SQUARES:
 		b.append("")
-	return {"unlocked": Bal.BASE_START_SQUARES, "buildings": b, "essence": 0.0, "ore": 0.0, "smiteCharge": 99}
+	return {"unlocked": Bal.BASE_START_SQUARES, "buildings": b, "essence": 0.0, "ore": 0.0, "timber": 0.0, "water": 0.0, "pearls": 0, "lanceLevel": 0, "lanceCharges": 0, "smiteCharge": 99}
 
 
 func has_building(id: String) -> bool:
@@ -161,6 +163,7 @@ func snapshot() -> Dictionary:
 		"may": may.duplicate(true),
 		"hold": hold.duplicate() if hold != null else null,
 		"nextId": next_id,
+		"eco": eco.serialize(),
 	}
 
 
@@ -171,6 +174,9 @@ func restore(snap: Dictionary) -> void:
 	board_made = not s.board.is_empty()
 	if board_made:
 		board = Board.new(seed, s.board)
+		eco = Economy.new(self)
+		eco.attach(board)
+		eco.load_data(s.get("eco", {}))
 	next_id = maxi(next_id, s.nextId)
 	tower_at.fill(0)
 	obj_at.fill(0)
@@ -257,6 +263,7 @@ func start_board(b: int) -> void:
 	if not board_made:
 		board = Board.new(seed)
 		board_made = true
+		eco.attach(board)
 	else:
 		var plan := board.plan_road(b, func(c: int) -> bool: return obj_at[c] != 0 or tower_at[c] != 0)
 		board.set_pending(plan.path)
@@ -346,6 +353,7 @@ func _finish_reveal() -> void:
 	board.commit_pending(func(c: int) -> bool: return obj_at[c] != 0 or tower_at[c] != 0)
 	_recompute_entries()
 	events.append({"t": "revealDone"})
+	eco.refill_lance()
 	if is_tutorial():
 		tutorial = {"step": 0, "text": "Drag a piece from the tray onto the board, near the road. Three touching pieces become a tower."}
 		add_piece(stream.make("J", "red"), true)
@@ -392,6 +400,7 @@ func _start_wave() -> void:
 			t += Bal.PACK_SPACING[sp.size]
 		at = maxf(at + Bal.BURST_GAP, t + 0.8)
 	wave_t = 0.0
+	eco.refill_lance()
 	piece_timer = Bal.WAVE_PIECE_INTERVAL
 	factory_t = 3.0
 	shape_factory_used = false
@@ -406,13 +415,9 @@ func _start_wave() -> void:
 
 func _end_wave() -> void:
 	events.append({"t": "waveEnd", "index": wave_index})
-	var o := 0.0
-	for h in harvesters:
-		o += h.oreCells
-	o *= 1.0 + Bal.BUILDING_FX.harvesterHub * building_mult("harvesterHub")
-	if o > 0.0:
-		base.ore += o
-		events.append({"t": "ore", "amount": o})
+	var gained := eco.end_wave(Rng.new(Rng.sub_seed(seed, [515, board_no, wave_index, attempt])))
+	if gained.ore + gained.timber + gained.water > 0.0:
+		events.append({"t": "harvest", "ore": gained.ore, "timber": gained.timber, "water": gained.water})
 	base.smiteCharge += 1
 	projectiles.clear()
 	puddles.clear()
@@ -432,6 +437,8 @@ func _finish_metrics() -> void:
 	metrics.integrity = integrity
 	metrics.baseLost = maxf(0.0, Bal.BASE_INTEGRITY - integrity) / Bal.BASE_INTEGRITY
 	metrics.combosPeak = combo.peak
+	var tot := eco.pimple_income + eco.other_income
+	metrics["extra"] = {"pimpleShare": eco.pimple_income / tot if tot > 0.0 else 0.0, "timber": base.timber, "water": base.water, "pearls": base.pearls}
 	all_metrics.append(metrics.duplicate())
 
 
@@ -447,6 +454,7 @@ func next_board() -> void:
 	if phase != "base" or board_no >= Bal.BOARDS:
 		return
 	attempt = 1
+	eco.refill_lakes()
 	board_no += 1
 	board_snapshot = snapshot()
 	start_board(board_no)
@@ -466,13 +474,37 @@ func build(square: int, id: String) -> String:
 		return err
 	base.essence -= Bal.BUILDINGS[id].cost
 	base.buildings[square] = id
+	if id == "lance":
+		base.lanceLevel = 1
 	events.append({"t": "build", "square": square, "id": id})
 	return ""
 
 
 func convert_ore() -> void:
-	base.essence += floorf(base.ore)
-	base.ore -= floorf(base.ore)
+	var n := floorf(base.ore / Bal.ORE_TO_ESSENCE)
+	base.essence += n
+	base.ore -= n * Bal.ORE_TO_ESSENCE
+
+
+## Upgrade the Resource Lance one level (Essence). Returns "" or a reason.
+func upgrade_lance() -> String:
+	var lv: int = base.get("lanceLevel", 0)
+	if not has_building("lance"):
+		return "Build the Lance first"
+	if lv >= Bal.LANCE.charges.size():
+		return "Fully upgraded"
+	var cost: float = Bal.LANCE.upgrade[lv - 1]
+	if base.essence < cost:
+		return "Not enough Essence"
+	base.essence -= cost
+	base.lanceLevel = lv + 1
+	events.append({"t": "lanceUp", "level": lv + 1})
+	return ""
+
+
+## Pop a pimple with the Lance (the player clicks it, anywhere on the map).
+func pop_pimple(id: int) -> bool:
+	return not eco.pop(id).is_empty()
 
 
 # ================================================================ pieces & queues
@@ -622,7 +654,7 @@ func preview(piece: Dictionary, rot: int, mirror: bool, cx: int, cy: int) -> Dic
 			return _bad("That is the core", cells)
 		if obj_at[Board.cell_idx(c.x, c.y)] != 0:
 			return _bad("Occupied", cells)
-		if board.is_blocked_terrain(Board.cell_idx(c.x, c.y)):
+		if board.is_blocked_terrain(Board.cell_idx(c.x, c.y)) and not eco.is_forest(Board.cell_idx(c.x, c.y)):
 			return _bad(blocked_reason(Board.cell_idx(c.x, c.y)), cells)
 	var under := {}
 	for c in cells:
@@ -675,17 +707,14 @@ func preview(piece: Dictionary, rot: int, mirror: bool, cx: int, cy: int) -> Dic
 
 ## Harvest structures. v1.1: only ore veins. Overridden by the economy (forests, lakes) in milestone 3.
 func _preview_harvest(_piece: Dictionary, cells: Array) -> Dictionary:
-	var ore_n := 0
-	for c in cells:
-		if board.ore[Board.cell_idx(c.x, c.y)] != 0:
-			ore_n += 1
-	if ore_n > 0:
-		return {"ok": true, "cells": cells, "kind": "harvester", "node": "ore", "gained": ["Mine: %d ore per wave" % ore_n], "lost": [], "holes": []}
-	return {}
+	var pv := eco.preview_harvest(cells)
+	if not pv.is_empty() and not pv.ok:
+		return _bad(pv.reason, cells)
+	return pv
 
 
-func blocked_reason(_i: int) -> String:
-	return "Blocked"
+func blocked_reason(i: int) -> String:
+	return eco.blocked_reason(i)
 
 
 func _adjacent_towers(cells: Array, h0: int) -> Array[SimTower]:
@@ -918,6 +947,7 @@ func _place_harvester(piece: Dictionary, cells: Array, _pv: Dictionary) -> void:
 			ore_cells += 1
 	var h := {"id": next_id, "piece": piece, "cells": cells, "oreCells": ore_cells, "node": "ore"}
 	next_id += 1
+	eco.setup_harvester(h)
 	harvesters.append(h)
 	for c in cells:
 		obj_at[Board.cell_idx(c.x, c.y)] = h.id

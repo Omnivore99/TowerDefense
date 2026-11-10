@@ -70,6 +70,8 @@ var mouse_pos := Vector2.ZERO
 var bolt_t := 0.0
 var sky_mat: ProceduralSkyMaterial
 var grid: MeshInstance3D
+var eco_view: EcoView
+var last_ground_version := -1
 ## Demo / screenshot mode (user args): --demo [--warp B,W,S] [--cam x,z,dist,yaw] [--shot path.png]
 var demo_bot: Bot
 var shot_path := ""
@@ -313,8 +315,15 @@ func _new_game(seed_value: int, mode: String, snapshot: Dictionary, tutorial: bo
 	for k in meta.get("elements", []):
 		g.discovered_elements[k] = true
 	g.undo_enabled = true
+	terrain.extra_kind = g.eco.ground_kind
 	terrain.setup(g.board)
 	last_road_version = g.board.version
+	last_ground_version = g.eco.ground_version
+	if eco_view == null:
+		eco_view = EcoView.new()
+		eco_view.name = "Economy"
+		add_child(eco_view)
+	eco_view.setup(self, g.eco)
 	last_revealed = 0
 	_build_core()
 	_resync_all()
@@ -384,15 +393,18 @@ func _process(delta: float) -> void:
 		alpha = clampf(acc / Bal.DT, 0.0, 1.0)
 	else:
 		_handle_events(g.drain_events())
-	if g.board.version != last_road_version:
+	if g.board.version != last_road_version or g.eco.ground_version != last_ground_version:
 		last_road_version = g.board.version
+		last_ground_version = g.eco.ground_version
 		terrain.rebuild()
 		_build_core()
+		eco_view.setup(self, g.eco)
 	_sync_reveal(delta)
 	_sync_towers()
 	_sync_enemies(delta)
 	_sync_projectiles()
 	_sync_misc(delta)
+	eco_view.sync(delta)
 	if core != null:
 		core.get_node("Heart").scale = Vector3.ONE * (1.0 + 0.06 * sin(Time.get_ticks_msec() * 0.003))
 		core_ring.rotation.z += delta * 0.6
@@ -532,9 +544,26 @@ func _handle_events(evs: Array) -> void:
 			"early":
 				hud.toast("Early call: +%d ◆" % int(Bal.EARLY_CALL_BONUS), Color(1, 0.85, 0.45), 1.6)
 				sfx.play("chime")
-			"ore":
-				hud.toast("+%d ore from harvesters" % int(e.amount), Color(0.85, 0.65, 0.4), 1.8)
+			"harvest":
+				var parts: PackedStringArray = []
+				for k in ["ore", "timber", "water"]:
+					if e[k] > 0.0:
+						parts.append("+%d %s" % [int(e[k]), k])
+				hud.toast(", ".join(parts), Color(0.85, 0.75, 0.55), 1.8)
 				sfx.play("chime")
+			"pop":
+				_on_pop(e)
+			"treeFell":
+				var tp := eco_view._cell_xyz(e.cell, 0.8)
+				fx.burst(tp, 14, 2.5, Color(0.3, 0.45, 0.25), 0.08, 0.9, "debris", 4.0)
+				sfx.play_at("chop", tp, 0.0, 0.7)
+			"pimpleSprout":
+				fx.burst(eco_view._cell_xyz(e.cell, 0.1), 6, 1.5, Color(0.4, 0.33, 0.25), 0.06, 0.5, "debris", 8.0)
+			"pimpleWither":
+				fx.smoke(eco_view._cell_xyz(e.cell, 0.1), 4, Color(0.15, 0.14, 0.13, 0.6), 0.2, 1.0, 0.4)
+			"lanceUp":
+				hud.toast("Lance level %d: %d charges per wave" % [e.level, g.eco.lance_charges_max()], Color(1, 0.85, 0.45))
+				sfx.play("bell")
 			"discover":
 				hud.toast("New element: %s" % e.element, Color(0.7, 0.9, 1.0), 2.0)
 			"loot":
@@ -548,6 +577,39 @@ func _handle_events(evs: Array) -> void:
 				sfx.play("bell")
 			"recycle":
 				hud.toast("+%d ◆" % int(e.essence), Color(1, 0.85, 0.45), 1.0)
+
+
+## The Lance on the base fires a needle across the map (0.382 s), then the pimple bursts.
+func _on_pop(e: Dictionary) -> void:
+	var target := eco_view.pimple_world(e.cell)
+	var from := core.global_position + Vector3(0, 6.0, 0) if core != null else target + Vector3(0, 10, 0)
+	var mid := (from + target) / 2.0 + Vector3(0, from.distance_to(target) * 0.12, 0)
+	fx.ribbon(from, mid, 0.06, Color(1, 0.95, 0.8), Bal.T_M)
+	fx.ribbon(mid, target, 0.06, Color(1, 0.95, 0.8), Bal.T_M)
+	sfx.play("click", -6.0, 1)
+	var tw := create_tween()
+	tw.tween_interval(Bal.T_M)
+	tw.tween_callback(func(): _pop_burst(e, target))
+
+
+func _pop_burst(e: Dictionary, at: Vector3) -> void:
+	var res: String = e.res
+	var col: Color = EcoView.RES_COLOR[res]
+	if e.black:
+		fx.smoke(at, 8, Color(0.12, 0.11, 0.1, 0.7), 0.22, 1.2, 0.6)
+		sfx.play_at("tap", at)
+	else:
+		var big: bool = e.stage == "ripe"
+		fx.burst(at, 30 if big else 12, 5.0 if big else 3.0, col, 0.1, 0.8, "glob", 10.0)
+		fx.ring(at - Vector3(0, 0.25, 0), 0.2, 1.4 if big else 0.8, 0.4, Color(col.r, col.g, col.b, 0.7))
+		fx.smoke(at, 3, Color(0.8, 0.8, 0.82, 0.4), 0.18, 0.6, 0.6)
+		sfx.play_at("pop_ripe" if big else "pop_dull", at)
+		cam_rig.add_nudge(Vector3(0, -0.12 if big else -0.05, 0))
+	var txt := "+%d %s" % [int(e.amount), res] if e.amount > 0 else "nothing left"
+	if e.pearl:
+		txt += "  and a PEARL!"
+		sfx.play("chime", 2.0, 2)
+	hud.toast(txt, col.lightened(0.3) if not e.black else Color(0.7, 0.7, 0.72), 1.8)
 
 
 func _tower_x(id: int) -> float:
@@ -663,7 +725,7 @@ func _on_place(e: Dictionary) -> void:
 		"barrier", "mine":
 			_sync_road_pieces(true)
 		"harvester":
-			_sync_harvesters()
+			sfx.play_at("chime", p, -6.0)
 
 
 func _on_phase(p: String) -> void:
@@ -895,11 +957,6 @@ func _sync_harvesters() -> void:
 
 func _sync_misc(delta: float) -> void:
 	_sync_road_pieces()
-	_sync_harvesters()
-	for id in harv_views:
-		for c in harv_views[id].get_children():
-			if c.name.begins_with("Drill"):
-				c.rotation.y += delta * 4.0
 	# tanks
 	var seen := {}
 	for k in g.tanks:
@@ -975,7 +1032,12 @@ func _update_ghost() -> void:
 		grid.position = Vector3(cell.x + 0.5, _ground_y(cell.x + 0.5, cell.y + 0.5) + 0.03, cell.y + 0.5)
 	if p == null or not playing or hud.has_modal() or cell.x < -100:
 		ghost.visible = false
-		hud.set_hint("" if p == null else "[color=#8a93a6]Point at the ground to place[/color]")
+		var hint_txt := "" if p == null else "[color=#8a93a6]Point at the ground to place[/color]"
+		if p == null and Board.in_grid(cell.x, cell.y):
+			var pm := g.eco.pimple_at(Board.cell_idx(cell.x, cell.y))
+			if not pm.is_empty():
+				hint_txt = eco_view.pimple_hint(pm)
+		hud.set_hint(hint_txt)
 		_update_range_preview(null)
 		return
 	var sig := "%d|%d|%s|%d,%d|%d" % [p.id, rot, str(mirror), cell.x, cell.y, g.towers.size() + g.board.version * 1000]
@@ -1179,6 +1241,17 @@ func _click(pos: Vector2) -> void:
 			if g.get_piece(selected) == null:
 				selected = _auto_next()
 		return
+	# pop a pimple with the Lance
+	if Board.in_grid(cell.x, cell.y):
+		var pm := g.eco.pimple_at(Board.cell_idx(cell.x, cell.y))
+		if not pm.is_empty():
+			if g.eco.lance_level() == 0:
+				hud.toast("Build the Resource Lance at the base to pop pimples", Color(1, 0.7, 0.5), 2.0)
+			elif g.eco.charges() <= 0:
+				hud.toast("The Lance is out of charges until the next wave", Color(1, 0.7, 0.5), 1.6)
+			else:
+				g.pop_pimple(pm.id)
+			return
 	# select a tower
 	if Board.in_grid(cell.x, cell.y):
 		var tid := g.tower_at[Board.cell_idx(cell.x, cell.y)]
@@ -1344,9 +1417,18 @@ func _cleared_screen() -> void:
 
 
 func _base_screen() -> void:
-	var vb := hud.open_modal("Your base", "Essence [color=#ffcf6b]%d ◆[/color] · Ore %d" % [int(g.base.essence), int(g.base.ore)], [
+	var lv := g.eco.lance_level()
+	var lance_txt := ""
+	if lv > 0 and lv < Bal.LANCE.charges.size():
+		lance_txt = "Upgrade Lance (%d ◆)" % Bal.LANCE.upgrade[lv - 1]
+	var vb := hud.open_modal("Your base", "Essence [color=#ffcf6b]%d ◆[/color] · Ore %d · Timber %d · Water %d · Pearls %d\n[color=#8a93a6]Ore converts to Essence at %d : 1.[/color]" % [int(g.base.essence), int(g.base.ore), int(g.base.timber), int(g.base.water), int(g.base.pearls), int(Bal.ORE_TO_ESSENCE)], [
 		["Convert ore → ◆", func():
 			g.convert_ore()
+			_base_screen()],
+		[lance_txt if lance_txt != "" else "Lance: max level" if lv > 0 else "No Lance yet", func():
+			var err := g.upgrade_lance()
+			if err != "":
+				hud.toast(err, Color(1, 0.6, 0.5), 1.4)
 			_base_screen()],
 		["Next board ▶", func():
 			hud.close_modal()
