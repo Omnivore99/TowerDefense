@@ -16,6 +16,7 @@ var integrity_bar: ProgressBar
 var preview_label: RichTextLabel
 var ready_btn: Button
 var speed_btns: Array[Button] = []
+var mute_btn: Button
 var must_slots: Array[Button] = []
 var may_slots: Array[Button] = []
 var hold_slot: Button
@@ -214,6 +215,12 @@ func _build_top() -> void:
 		b.pressed.connect(func(): w.set_speed(s))
 		hb.add_child(b)
 		speed_btns.append(b)
+	mute_btn = Button.new()
+	mute_btn.tooltip_text = "Sound on/off (M)"
+	mute_btn.custom_minimum_size = Vector2(64, 0)
+	mute_btn.pressed.connect(func(): w.toggle_mute())
+	hb.add_child(mute_btn)
+	set_muted(bool(w.settings.get("muted", false)))
 	var pause := Button.new()
 	pause.text = "❚❚"
 	pause.tooltip_text = "Pause (P)"
@@ -527,6 +534,12 @@ func combo(n: int) -> void:
 	combo_label.pivot_offset = combo_label.size / 2.0
 	var tw := create_tween()
 	tw.tween_property(combo_label, "scale", Vector2.ONE, Bal.T_M).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+func set_muted(on: bool) -> void:
+	if mute_btn != null:
+		mute_btn.text = "Muted" if on else "Sound"
+		mute_btn.modulate = Color(1, 0.6, 0.5) if on else Color.WHITE
 
 
 # ----------------------------------------------------------------- hover pop-ups

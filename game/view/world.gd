@@ -124,6 +124,7 @@ func _ready() -> void:
 	sfx.name = "Sfx"
 	add_child(sfx)
 	sfx.set_volumes(float(settings.volume), float(settings.music))
+	AudioServer.set_bus_mute(0, bool(settings.get("muted", false)))
 	fx.casing_landed.connect(func(pos: Vector3): sfx.play_at("casing", pos))
 	ghost = Node3D.new()
 	ghost.name = "Ghost"
@@ -2327,7 +2328,23 @@ func _cancel() -> void:
 		hud.hide_card()
 
 
+## Mute or unmute everything (Master bus). Remembered in the settings.
+func toggle_mute() -> void:
+	set_muted(not bool(settings.get("muted", false)))
+
+
+func set_muted(on: bool) -> void:
+	settings["muted"] = on
+	AudioServer.set_bus_mute(0, on)
+	SaveIO.save_settings(settings)
+	hud.set_muted(on)
+
+
 func _key(k: Key) -> void:
+	if k == KEY_M:
+		toggle_mute()
+		hud.toast("Sound off (M)" if settings.muted else "Sound on", Color(0.9, 0.85, 0.7), 1.0)
+		return
 	if hud.has_modal():
 		if k == KEY_ESCAPE and paused:
 			_resume()
@@ -2477,8 +2494,18 @@ func _settings_screen(from_title: bool) -> void:
 		s.step = 0.05
 		s.value = float(settings[key])
 		s.custom_minimum_size = Vector2(200, 24)
-		s.value_changed.connect(func(v: float): settings[key] = v)
+		s.value_changed.connect(func(v: float):
+			settings[key] = v
+			if key != "camSensitivity":
+				sfx.set_volumes(float(settings.volume), float(settings.music)))
 		grid.add_child(s)
+	var ml := Label.new()
+	ml.text = "Mute all sound (M)"
+	grid.add_child(ml)
+	var mc := CheckBox.new()
+	mc.button_pressed = bool(settings.get("muted", false))
+	mc.toggled.connect(func(v: bool): set_muted(v))
+	grid.add_child(mc)
 	for key in ["reducedMotion", "showRanges", "colourBlind"]:
 		var l2 := Label.new()
 		l2.text = {"reducedMotion": "Reduced motion (no shake)", "showRanges": "Always show ranges", "colourBlind": "Colour-blind glyph marks"}[key]
