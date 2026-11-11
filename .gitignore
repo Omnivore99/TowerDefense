@@ -1,3 +1,7 @@
 node_modules
 dist
 .vite
+.godot/
+reports/*.json
+!reports/.gitkeep
+game/build/
