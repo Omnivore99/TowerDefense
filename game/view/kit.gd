@@ -68,6 +68,7 @@ void fragment(){
 	grass *= 0.86 + 0.24 * n2;
 	vec3 col = grass;
 	float rough = 0.95;
+	float shade_lvl = lvl;
 	if (kind > 0.5 && kind < 1.5) {
 		// cobbled road: offset rows of rounded stones
 		vec2 uv = wpos.xz * 2.2;
@@ -103,11 +104,22 @@ void fragment(){
 	} else if (kind > 5.5 && kind < 6.5) {
 		// forest floor: darker moss with needle litter
 		col = mix(vec3(0.19, 0.25, 0.15), vec3(0.27, 0.24, 0.17), vnoise(wpos.xz * 2.3));
+	} else if (kind > 6.5 && kind < 7.5) {
+		// the landscape around the board: meadow on the low rolls, heath higher up,
+		// slate rock on steep slopes and the mountain tops, pale dust on the highest peaks
+		vec3 heath = mix(vec3(0.30, 0.31, 0.24), vec3(0.36, 0.32, 0.27), n1);
+		col = mix(grass * 0.92, heath, smoothstep(2.0, 9.0, wpos.y + n1 * 3.0));
+		vec3 rock = vec3(0.30, 0.31, 0.36) * (0.7 + 0.4 * vnoise(wpos.xz * 0.6 + wpos.y));
+		float steep = smoothstep(0.88, 0.7, wn.y);
+		col = mix(col, rock, max(steep, smoothstep(14.0, 22.0, wpos.y + n1 * 4.0)));
+		col = mix(col, vec3(0.62, 0.62, 0.68), smoothstep(30.0, 38.0, wpos.y + n2 * 3.0) * (1.0 - steep * 0.7));
+		rough = 0.92;
+		shade_lvl = 0.0;
 	}
 	// cliffs: darker stone faces
 	if (abs(wn.y) < 0.5) { col = vec3(0.30, 0.31, 0.36) * (0.75 + 0.35 * vnoise(vec2(wpos.x + wpos.z, wpos.y * 3.0) * 2.0)); rough = 0.9; }
 	// valleys are a little darker, rises a little lighter
-	col *= 1.0 + clamp(lvl, -2.0, 3.0) * 0.05;
+	col *= 1.0 + clamp(shade_lvl, -2.0, 3.0) * 0.05;
 	ALBEDO = pow(col, vec3(2.2));
 	ROUGHNESS = rough;
 }

@@ -3,6 +3,72 @@ extends Node3D
 ## Pooled, capped effects: puffs (smoke, dust, goo), sparks, brass casings that bounce and
 ## tinkle, debris, glowing ribbons (tracers, beams, bolts, smoke streaks), rings and decals.
 ## Oldest effects fade first. Particle counts scale with the quality preset; gameplay never does.
+## Puffs are soft, noisy billboards that can start as fire (heat) and cool to smoke; sparks
+## are additive streaks stretched along their velocity (tracers, embers, muzzle flashes).
+## A small pool of short-lived lights makes flashes and explosions light up the ground.
+
+const SPARK_SHADER := """
+shader_type spatial;
+render_mode unshaded, blend_add, depth_draw_never, cull_disabled, shadows_disabled;
+varying vec4 col;
+void vertex(){
+	col = COLOR;
+	float size = length(MODEL_MATRIX[0].xyz);
+	vec4 c = VIEW_MATRIX * vec4(MODEL_MATRIX[3].xyz, 1.0);
+	vec3 v = (VIEW_MATRIX * vec4(INSTANCE_CUSTOM.xyz, 0.0)).xyz;
+	float sp = length(v.xy);
+	vec2 ax = sp > 0.001 ? v.xy / sp : vec2(0.0, 1.0);
+	vec2 pr = vec2(-ax.y, ax.x);
+	float len = size + sp * INSTANCE_CUSTOM.w;
+	vec2 off = ax * VERTEX.y * len * 2.6 + pr * VERTEX.x * size * 2.6;
+	POSITION = PROJECTION_MATRIX * vec4(c.xyz + vec3(off, 0.0), 1.0);
+}
+void fragment(){
+	vec2 q = UV * 2.0 - 1.0;
+	float d = length(q);
+	float a = pow(clamp(1.0 - d, 0.0, 1.0), 1.6);
+	float core = pow(clamp(1.0 - d * 1.8, 0.0, 1.0), 2.0);
+	ALBEDO = col.rgb * 1.6 + vec3(1.0, 0.95, 0.85) * core * 1.4;
+	ALPHA = a * col.a;
+}
+"""
+
+const PUFF_SHADER := """
+shader_type spatial;
+render_mode unshaded, blend_mix, depth_draw_never, cull_disabled, shadows_disabled;
+varying vec4 col;
+varying vec4 cust;
+float h21(vec2 p){ p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float vnoise(vec2 p){ vec2 i = floor(p); vec2 f = fract(p); f = f*f*(3.0-2.0*f);
+	return mix(mix(h21(i), h21(i+vec2(1,0)), f.x), mix(h21(i+vec2(0,1)), h21(i+vec2(1,1)), f.x), f.y); }
+void vertex(){
+	col = COLOR;
+	cust = INSTANCE_CUSTOM;
+	float size = length(MODEL_MATRIX[0].xyz);
+	vec4 c = VIEW_MATRIX * vec4(MODEL_MATRIX[3].xyz, 1.0);
+	float r = cust.z * 6.2831;
+	vec2 o = VERTEX.xy * size * 2.8;
+	o = vec2(o.x * cos(r) - o.y * sin(r), o.x * sin(r) + o.y * cos(r));
+	POSITION = PROJECTION_MATRIX * vec4(c.xyz + vec3(o, 0.0), 1.0);
+}
+void fragment(){
+	vec2 q = UV * 2.0 - 1.0;
+	float age = 1.0 - cust.y;
+	vec2 nuv = UV * 2.6 + vec2(cust.z * 17.0, cust.z * 9.0) + vec2(0.0, age * 0.6);
+	float n = vnoise(nuv) * 0.6 + vnoise(nuv * 2.3) * 0.4;
+	float d = length(q) + (n - 0.5) * 0.55;
+	float shape = 1.0 - smoothstep(0.35, 0.95, d);
+	// lit from above: the top of each puff is a little lighter
+	float shade = mix(0.72, 1.18, clamp(1.0 - UV.y + (n - 0.5) * 0.4, 0.0, 1.0));
+	vec3 c = col.rgb * shade * 1.35;
+	// fire: hot puffs start white-gold, cool through orange to the smoke colour
+	float heat = cust.x * pow(cust.y, 2.2);
+	vec3 fire = mix(vec3(1.0, 0.32, 0.06), vec3(1.0, 0.86, 0.45), clamp(heat * 1.4 - (d * 0.6), 0.0, 1.0));
+	c = mix(c, fire * (1.2 + 2.6 * heat), clamp(heat * 1.6, 0.0, 1.0));
+	ALBEDO = c;
+	ALPHA = shape * col.a;
+}
+"""
 
 signal casing_landed(pos: Vector3)
 
@@ -37,12 +103,24 @@ class Pool:
 	var spin: PackedVector3Array = PackedVector3Array()
 	var rot: PackedVector3Array = PackedVector3Array()
 	var bounced: PackedByteArray = PackedByteArray()
+	var heat: PackedFloat32Array = PackedFloat32Array()
+	var seed: PackedFloat32Array = PackedFloat32Array()
+	var stretch := 0.0  ## sparks: streak length per unit of speed (0 = none / not a billboard)
+	var billboard := false
 	var n := 0
 
 
+## Lights for flashes: a handful, reused oldest-first.
+var lights: Array = []  ## {node, life, max, energy}
+const LIGHT_CAP := 8
+
+
 func _ready() -> void:
-	_pool("puff", Kit.sphere(1.0, 8), _particle_mat(false))
-	_pool("spark", Kit.sphere(1.0, 6), _particle_mat(true))
+	_pool("puff", _quad(), _billboard_mat("puff", PUFF_SHADER))
+	_pool("spark", _quad(), _billboard_mat("spark", SPARK_SHADER))
+	pools.puff.billboard = true
+	pools.spark.billboard = true
+	pools.spark.stretch = 0.045
 	_pool("glob", Kit.sphere(1.0, 8), _glob_mat())
 	_pool("casing", Kit.cylinder(0.035, 0.035, 0.13, 6), _casing_mat())
 	_pool("debris", Kit.box(Vector3.ONE), _debris_mat())
@@ -58,6 +136,18 @@ func _ready() -> void:
 	add_child(rmi2)
 	decal_root = Node3D.new()
 	add_child(decal_root)
+
+
+static func _quad() -> QuadMesh:
+	var q := QuadMesh.new()
+	q.size = Vector2.ONE
+	return q
+
+
+func _billboard_mat(key: String, code: String) -> ShaderMaterial:
+	var m := ShaderMaterial.new()
+	m.shader = Kit._shader("fx_" + key, code)
+	return m
 
 
 func _particle_mat(additive: bool) -> StandardMaterial3D:
@@ -117,17 +207,19 @@ func _pool(name_id: String, mesh: Mesh, mat: Material) -> void:
 	p.mm = MultiMesh.new()
 	p.mm.transform_format = MultiMesh.TRANSFORM_3D
 	p.mm.use_colors = true
+	p.mm.use_custom_data = true
 	p.mm.mesh = mesh
 	p.mm.instance_count = p.cap
 	p.mm.visible_instance_count = 0
 	p.node = MultiMeshInstance3D.new()
 	p.node.multimesh = p.mm
 	p.node.material_override = mat
+	p.node.extra_cull_margin = 4.0
 	p.node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF if name_id != "casing" and name_id != "debris" else GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	add_child(p.node)
 	for arr in [p.pos, p.vel, p.spin, p.rot]:
 		arr.resize(p.cap)
-	for arr in [p.life, p.maxl, p.size, p.grow, p.grav, p.drag]:
+	for arr in [p.life, p.maxl, p.size, p.grow, p.grav, p.drag, p.heat, p.seed]:
 		arr.resize(p.cap)
 	p.col.resize(p.cap)
 	p.bounced.resize(p.cap)
@@ -135,7 +227,7 @@ func _pool(name_id: String, mesh: Mesh, mat: Material) -> void:
 
 
 ## Emit one particle. Returns false when the pool is full (the oldest is replaced).
-func emit(pool_id: String, pos: Vector3, vel: Vector3, life: float, size: float, col: Color, grav: float = 0.0, drag: float = 0.0, grow: float = 0.0) -> void:
+func emit(pool_id: String, pos: Vector3, vel: Vector3, life: float, size: float, col: Color, grav: float = 0.0, drag: float = 0.0, grow: float = 0.0, heat: float = 0.0) -> void:
 	var p: Pool = pools[pool_id]
 	var i := p.n
 	if p.n >= p.cap:
@@ -162,6 +254,8 @@ func emit(pool_id: String, pos: Vector3, vel: Vector3, life: float, size: float,
 	p.spin[i] = Vector3(randf_range(-12, 12), randf_range(-12, 12), randf_range(-12, 12))
 	p.rot[i] = Vector3(randf() * TAU, randf() * TAU, 0)
 	p.bounced[i] = 0
+	p.heat[i] = heat
+	p.seed[i] = randf()
 
 
 func _step_pool(id: String, p: Pool, delta: float) -> void:
@@ -183,6 +277,8 @@ func _step_pool(id: String, p: Pool, delta: float) -> void:
 			p.spin[i] = p.spin[last]
 			p.rot[i] = p.rot[last]
 			p.bounced[i] = p.bounced[last]
+			p.heat[i] = p.heat[last]
+			p.seed[i] = p.seed[last]
 			p.n -= 1
 			continue
 		var v := p.vel[i]
@@ -215,6 +311,12 @@ func _step_pool(id: String, p: Pool, delta: float) -> void:
 		var c := p.col[k]
 		var fade := f if id != "casing" else minf(1.0, f * 4.0)
 		mm.set_instance_color(k, Color(c.r, c.g, c.b, c.a * fade))
+		if p.billboard:
+			if p.stretch > 0.0:
+				var v := p.vel[k]
+				mm.set_instance_custom_data(k, Color(v.x, v.y, v.z, p.stretch))
+			else:
+				mm.set_instance_custom_data(k, Color(p.heat[k], f, p.seed[k], 0.0))
 	mm.visible_instance_count = p.n
 
 
@@ -222,6 +324,7 @@ func _process(delta: float) -> void:
 	for id in pools:
 		_step_pool(id, pools[id], delta)
 	_draw_ribbons(delta)
+	_step_lights(delta)
 	_step_rings(delta)
 	_step_decals(delta)
 
@@ -406,25 +509,98 @@ func smoke(pos: Vector3, n: int, c: Color = Color(0.55, 0.57, 0.62, 0.5), size: 
 
 
 func explosion(pos: Vector3, r: float, c: Color) -> void:
-	emit("spark", pos + Vector3(0, 0.3, 0), Vector3.ZERO, 0.18, r * 0.9, Color(1.0, 0.9, 0.6, 0.9), 0.0, 0.0, 0.8)
-	burst(pos + Vector3(0, 0.2, 0), 18, 7.0 * maxf(0.6, r * 0.5), Color(1.0, 0.6, 0.25), 0.1, 0.45)
-	smoke(pos, 10, Color(0.35, 0.33, 0.33, 0.55), 0.35 * maxf(1.0, r * 0.6), 1.4, 1.2)
+	var big := maxf(1.0, r * 0.6)
+	flash(pos + Vector3(0, 0.6, 0), Color(1.0, 0.62, 0.3), 5.0 * big, 3.0 + r * 2.2, 0.35)
+	emit("spark", pos + Vector3(0, 0.3, 0), Vector3.ZERO, 0.14, r * 0.8, Color(1.0, 0.9, 0.6, 1.0), 0.0, 0.0, 1.0)
+	# fireball: hot puffs that roll outward and up, cooling into a smoke column
+	var nf := maxi(4, int(10 * quality * big))
+	for i in nf:
+		var d := Vector3(randf_range(-1, 1), randf_range(0.1, 0.9), randf_range(-1, 1)).normalized()
+		emit("puff", pos + d * 0.2 * r, d * randf_range(1.5, 3.2) * maxf(0.7, r * 0.5), randf_range(0.6, 1.1), 0.28 * big * randf_range(0.8, 1.3), Color(0.36, 0.34, 0.34, 0.62), -0.8, 2.2, 1.4, 1.0)
+	smoke(pos + Vector3(0, 0.3, 0), 6, Color(0.33, 0.31, 0.31, 0.5), 0.35 * big, 1.8, 1.3)
+	# sparks and glowing embers that arc out and fall
+	var ne := maxi(4, int(16 * quality * big))
+	for i in ne:
+		var d := Vector3(randf_range(-1, 1), randf_range(0.4, 1.4), randf_range(-1, 1)).normalized()
+		emit("spark", pos + Vector3(0, 0.3, 0), d * randf_range(4.0, 9.0) * maxf(0.7, r * 0.45), randf_range(0.3, 0.8), randf_range(0.03, 0.06), Color(1.0, randf_range(0.45, 0.7), 0.2), 9.0, 1.2)
 	burst(pos, 8, 5.0, Color(0.3, 0.28, 0.27), 0.12, 1.2, "debris", 14.0)
 	ring(pos + Vector3(0, 0.1, 0), 0.2, r * 1.3, 0.38, Color(c.r, c.g, c.b, 0.7))
 	decal(pos, r * 0.75, Color(0.04, 0.035, 0.035, 0.7), 8.0)
 
 
+## A muzzle flash along dir: a hot star, a streaked cone, a little smoke and a light blink.
+func muzzle(pos: Vector3, dir: Vector3, c: Color = Color(1.0, 0.78, 0.4), size: float = 1.0, light: bool = true) -> void:
+	var d := dir.normalized() if dir.length_squared() > 1e-6 else Vector3.FORWARD
+	emit("spark", pos, Vector3.ZERO, 0.06, 0.14 * size, Color(c.r, c.g, c.b, 1.0))
+	emit("spark", pos + d * 0.1 * size, d * 14.0 * size, 0.05, 0.07 * size, c)
+	for i in maxi(1, int(3 * quality)):
+		var side := Vector3(randf_range(-1, 1), randf_range(-0.6, 0.8), randf_range(-1, 1)) * 0.45
+		emit("spark", pos, (d + side).normalized() * randf_range(5.0, 9.0) * size, 0.05, 0.04 * size, c)
+	if randf() < 0.6:
+		emit("puff", pos + d * 0.15, d * 0.8 + Vector3(0, 0.4, 0), 0.6, 0.09 * size, Color(0.55, 0.55, 0.58, 0.35), -0.3, 1.5, 2.0)
+	if light:
+		flash(pos + d * 0.2, c, 1.6 * size, 2.2 + size, 0.07)
+
+
+## Fire and smoke trail behind a rocket (called per frame).
+func rocket_trail(pos: Vector3, vel: Vector3) -> void:
+	emit("spark", pos, -vel * 0.4, 0.06, 0.08, Color(1.0, 0.55, 0.2))
+	emit("puff", pos, -vel * 0.05 + Vector3(randf_range(-0.2, 0.2), 0.3, randf_range(-0.2, 0.2)), randf_range(0.7, 1.1), 0.1, Color(0.6, 0.6, 0.63, 0.45), -0.2, 1.2, 2.2, 0.7)
+
+
+## A short-lived point light (the oldest one is reused when all are busy).
+func flash(pos: Vector3, c: Color, energy: float, rng: float, life: float) -> void:
+	if quality < 1.0 and energy < 2.0:
+		return
+	var L: Dictionary
+	if lights.size() < LIGHT_CAP:
+		var o := OmniLight3D.new()
+		o.shadow_enabled = false
+		o.omni_attenuation = 1.6
+		add_child(o)
+		L = {"node": o, "life": 0.0, "max": 1.0, "energy": 0.0}
+		lights.append(L)
+	else:
+		L = lights[0]
+		for l in lights:
+			if l.life < L.life:
+				L = l
+	var node: OmniLight3D = L.node
+	node.position = pos
+	node.light_color = c
+	node.omni_range = rng
+	node.visible = true
+	L.life = life
+	L.max = life
+	L.energy = energy
+	node.light_energy = energy
+
+
+func _step_lights(delta: float) -> void:
+	for l in lights:
+		if l.life <= 0.0:
+			continue
+		l.life -= delta
+		var node: OmniLight3D = l.node
+		if l.life <= 0.0:
+			node.visible = false
+		else:
+			var f: float = l.life / l.max
+			node.light_energy = l.energy * f * f
+
+
 ## Artillery impact (section 10.6): flash, rising stem, a rolling cap that billows out over
 ## 2.6 s, a ground shockwave and a burnt crater.
 func mushroom(pos: Vector3, r: float) -> void:
+	flash(pos + Vector3(0, 1.5, 0), Color(1.0, 0.7, 0.4), 9.0, 6.0 + r * 3.0, 0.8)
 	emit("spark", pos + Vector3(0, 0.6, 0), Vector3.ZERO, 0.25, r * 1.3, Color(1.0, 0.95, 0.8, 1.0), 0.0, 0.0, 1.2)
 	burst(pos + Vector3(0, 0.3, 0), 30, 8.0, Color(1.0, 0.55, 0.2), 0.12, 0.6)
 	for i in 14:
 		var j := Vector3(randf_range(-0.25, 0.25), 0.2, randf_range(-0.25, 0.25))
-		emit("puff", pos + j, Vector3(0, 2.2 + i * 0.22, 0), 2.6, 0.32 + 0.025 * i, Color(0.42, 0.36, 0.32, 0.75), 0.0, 1.1, 0.5)
+		emit("puff", pos + j, Vector3(0, 2.2 + i * 0.22, 0), 2.6, 0.32 + 0.025 * i, Color(0.42, 0.36, 0.32, 0.75), 0.0, 1.1, 0.5, 0.8)
 	for i in 22:
 		var a := i * TAU / 22.0
-		emit("puff", pos + Vector3(0, 1.2, 0), Vector3(cos(a) * 1.7, 4.4, sin(a) * 1.7), 2.6, 0.55, Color(0.52, 0.4, 0.32, 0.8), 0.0, 1.3, 0.9)
+		emit("puff", pos + Vector3(0, 1.2, 0), Vector3(cos(a) * 1.7, 4.4, sin(a) * 1.7), 2.6, 0.55, Color(0.52, 0.4, 0.32, 0.8), 0.0, 1.3, 0.9, 1.0)
 		emit("spark", pos + Vector3(0, 1.0, 0), Vector3(cos(a) * 1.2, 3.8, sin(a) * 1.2), 0.9, 0.3, Color(1.0, 0.5, 0.15, 0.8), 0.0, 1.3, 0.6)
 	ring(pos + Vector3(0, 0.1, 0), 0.3, r * 2.6, 0.7, Color(1.0, 0.85, 0.6, 0.7))
 	burst(pos, 12, 6.0, Color(0.3, 0.28, 0.27), 0.14, 1.4, "debris", 14.0)
@@ -434,6 +610,7 @@ func mushroom(pos: Vector3, r: float) -> void:
 ## The orbital beam (section 10.8): white core, blue fringe, 1 s.
 func beam(pos: Vector3, life: float = 1.0) -> void:
 	var top := pos + Vector3(0, 70, 0)
+	flash(pos + Vector3(0, 2.0, 0), Color(0.7, 0.85, 1.0), 12.0, 14.0, life)
 	ribbon(top, pos, 2.6, Color(0.35, 0.6, 1.0, 0.8), life)
 	ribbon(top, pos, 1.1, Color(1.0, 1.0, 1.0, 1.0), life * 0.9)
 	burst(pos + Vector3(0, 0.3, 0), 40, 9.0, Color(0.75, 0.88, 1.0), 0.1, 0.8)
