@@ -1,12 +1,19 @@
 class_name CamRig
 extends Node3D
-## Three-quarter perspective camera (about 50° pitch). Wheel zooms toward the cursor,
-## right-drag or WASD pans, Q / E rotate in 45° steps with an eased turn, Home recentres.
-## Also: screen shake, nudges, and the auto-directed spectator mode.
+## Free orbit camera. Wheel zooms toward the cursor; right-drag orbits (sideways turns,
+## up/down tilts); middle-drag, Shift+right-drag or WASD pans; Q / E turn 45° with an eased
+## swing; PageUp / PageDown tilt; Home recentres. Zooming in close lowers the view toward
+## the horizon a little, so close-ups look along the battlefield instead of down on it.
+## Also: screen shake, nudges, the auto-directed spectator mode, and a ground clamp so the
+## lens never dips into a hill.
 
-const PITCH := deg_to_rad(52.0)
-const MIN_DIST := 9.0
+const PITCH_DEFAULT := deg_to_rad(52.0)
+const PITCH_MIN := deg_to_rad(12.0)
+const PITCH_MAX := deg_to_rad(86.0)
+const MIN_DIST := 3.5
 const MAX_DIST := 150.0
+const CLOSE_DIST := 22.0  ## below this, the view eases toward the horizon
+const CLOSE_TILT := deg_to_rad(16.0)
 
 var cam: Camera3D
 var target := Vector3(84, 0, 52)
@@ -14,6 +21,10 @@ var dist := 120.0
 var dist_goal := 120.0
 var yaw := 0.0
 var yaw_goal := 0.0
+var pitch := PITCH_DEFAULT
+var pitch_goal := PITCH_DEFAULT
+## (x, z) -> ground height; keeps the camera above hills and cliffs.
+var ground_y: Callable
 var home := Vector3(84, 0, 52)
 var shake := 0.0
 var nudge := Vector3.ZERO
@@ -45,6 +56,25 @@ func frame_all() -> void:
 func recentre() -> void:
 	target = home
 	dist_goal = 46.0
+	pitch_goal = PITCH_DEFAULT
+
+
+## Right-drag: sideways turns the view around the target, up/down tilts it.
+func orbit(screen_delta: Vector2) -> void:
+	var s := 0.0055 * sensitivity
+	yaw_goal -= screen_delta.x * s
+	pitch_goal = clampf(pitch_goal + screen_delta.y * s * 0.8, PITCH_MIN, PITCH_MAX)
+
+
+func tilt_step(dir: int) -> void:
+	pitch_goal = clampf(pitch_goal + dir * deg_to_rad(8.0), PITCH_MIN, PITCH_MAX)
+
+
+## The pitch actually used: close zooms ease toward the horizon (never below PITCH_MIN).
+func effective_pitch() -> float:
+	var k := clampf((CLOSE_DIST - dist) / (CLOSE_DIST - MIN_DIST), 0.0, 1.0)
+	k = k * k * (3.0 - 2.0 * k)
+	return maxf(PITCH_MIN, pitch - CLOSE_TILT * k)
 
 
 func rotate_step(dir: int) -> void:
@@ -107,8 +137,17 @@ func _apply(delta: float) -> void:
 		target = target.lerp(spec_focus, 1.0 - pow(0.08, delta))
 		dist_goal = lerpf(dist_goal, 30.0, 1.0 - pow(0.3, delta))
 	dist = lerpf(dist, dist_goal, k)
-	yaw = lerp_angle(yaw, yaw_goal, 1.0 - pow(0.002, delta) if delta > 0.0 else 1.0)
-	var off := Vector3(sin(yaw) * cos(PITCH), sin(PITCH), cos(yaw) * cos(PITCH)) * dist
+	var turn := 1.0 - pow(0.002, delta) if delta > 0.0 else 1.0
+	yaw = lerpf(yaw, yaw_goal, turn)
+	pitch = lerpf(pitch, pitch_goal, turn)
+	var pe := effective_pitch()
+	var off := Vector3(sin(yaw) * cos(pe), sin(pe), cos(yaw) * cos(pe)) * dist
+	# keep the lens above the ground under it (hills, cliffs, the outer mountains)
+	if ground_y.is_valid():
+		var cp := target + off
+		var gy: float = ground_y.call(cp.x, cp.z) + 0.9
+		if cp.y < gy:
+			off.y += gy - cp.y
 	var shake_off := Vector3.ZERO
 	if shake > 0.0:
 		shake = maxf(0.0, shake - delta * 2.2)

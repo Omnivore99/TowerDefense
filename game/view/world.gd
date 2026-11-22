@@ -72,6 +72,7 @@ var last_road_version := -1
 var playing := false
 var pan_drag := false
 var pan_moved := 0.0
+var orbit_drag := false  ## right-drag orbits (Shift+right-drag pans instead)
 var mouse_pos := Vector2.ZERO
 var bolt_t := 0.0
 var sky_mat: ProceduralSkyMaterial
@@ -110,6 +111,7 @@ func _ready() -> void:
 	misc_root = _root("Misc")
 	cam_rig = CamRig.new()
 	cam_rig.name = "CamRig"
+	cam_rig.ground_y = _ground_y
 	cam_rig.reduced_motion = settings.reducedMotion
 	cam_rig.sensitivity = float(settings.camSensitivity)
 	add_child(cam_rig)
@@ -244,8 +246,17 @@ func _start_demo(args: PackedStringArray) -> void:
 		if c.size() > 3:
 			cam_rig.yaw_goal = deg_to_rad(float(c[3]))
 			cam_rig.yaw = cam_rig.yaw_goal
+		if c.size() > 4:
+			cam_rig.pitch_goal = deg_to_rad(float(c[4]))
+			cam_rig.pitch = cam_rig.pitch_goal
 	else:
 		cam_rig.recentre()
+	if _arg(args, "--pitch", "") != "":
+		cam_rig.pitch_goal = deg_to_rad(float(_arg(args, "--pitch", "52")))
+		cam_rig.pitch = cam_rig.pitch_goal
+	if _arg(args, "--yaw", "") != "":
+		cam_rig.yaw_goal = deg_to_rad(float(_arg(args, "--yaw", "0")))
+		cam_rig.yaw = cam_rig.yaw_goal
 	demo_hover = _arg(args, "--hover", "")
 	demo_hurt = args.has("--hurt")
 	shot_path = _arg(args, "--shot", "")
@@ -508,7 +519,10 @@ func _ground_y(x: float, z: float) -> float:
 		return 0.0
 	var cx := clampi(floori(x), 0, Bal.GRID_W - 1)
 	var cy := clampi(floori(z), 0, Bal.GRID_H - 1)
-	return g.board.h(cx, cy) * Kit.LH
+	var inside: float = g.board.h(cx, cy) * Kit.LH
+	if x < 0.0 or z < 0.0 or x >= Bal.GRID_W or z >= Bal.GRID_H:
+		return maxf(inside, TerrainView.outer_height(x, z))
+	return inside
 
 
 # ------------------------------------------------------------------ per frame
@@ -596,9 +610,17 @@ func _handle_events(evs: Array) -> void:
 			"bolt":
 				var a := _muzzle(e.towerId, e.x1, e.y1) if e.x1 == _tower_x(e.towerId) else _w(e.x1, e.y1, 0.6)
 				var b := _w(e.x2, e.y2, 0.6)
+				fx.ribbon(a, b, 0.22, Color(0.45, 0.6, 1.0, 0.3), 0.2, true, 7)
 				fx.ribbon(a, b, 0.09, Color(0.7, 0.85, 1.0), 0.16, true, 7)
 				fx.ribbon(a, b, 0.035, Color(1, 1, 1), 0.12, true, 5)
-				fx.burst(b, 5, 3.0, Color(0.7, 0.85, 1.0), 0.06, 0.25)
+				# a forked branch or two that crackle off the main bolt
+				for k in randi_range(1, 2):
+					var m0 := a.lerp(b, randf_range(0.3, 0.7))
+					var off := Vector3(randf_range(-1, 1), randf_range(-0.3, 0.6), randf_range(-1, 1)) * a.distance_to(b) * 0.3
+					fx.ribbon(m0, m0 + off, 0.04, Color(0.75, 0.88, 1.0, 0.8), 0.1, true, 4)
+				fx.burst(b, 6, 4.0, Color(0.7, 0.85, 1.0), 0.04, 0.3)
+				fx.emit("spark", b, Vector3.ZERO, 0.1, 0.25, Color(0.7, 0.85, 1.0, 0.9))
+				fx.flash(b + Vector3(0, 0.4, 0), Color(0.6, 0.75, 1.0), 2.5, 4.0, 0.12)
 				_tower_sound(tower_views.get(e.towerId), "bolt", a)
 			"aura":
 				var tv: TowerView = tower_views.get(e.towerId)
@@ -612,7 +634,10 @@ func _handle_events(evs: Array) -> void:
 				cam_rig.add_shake(0.12 if not e.get("big", false) else 0.4)
 				sfx.play_at("boom", _w(e.x, e.y, 0.5), -4.0 if r < 2.0 else 0.0)
 			"impact":
-				fx.burst(_w(e.x, e.y, 0.5), 6, 3.5, _glow_of(e.get("color", "gold")), 0.06, 0.3)
+				var ip := _w(e.x, e.y, 0.5)
+				fx.burst(ip, 6, 3.5, _glow_of(e.get("color", "gold")), 0.04, 0.3)
+				fx.emit("spark", ip, Vector3.ZERO, 0.06, 0.12, Color(1, 0.85, 0.6, 0.8))
+				fx.emit("puff", ip, Vector3(0, 0.5, 0), 0.45, 0.08, Color(0.55, 0.53, 0.5, 0.35), 0.0, 1.0, 1.5)
 			"puddle":
 				if e.get("kind", "acid") == "fire":
 					fx.burst(_w(e.x, e.y, 0.3), 4, 2.0, Color(1.0, 0.55, 0.15), 0.08, 0.5)
@@ -1026,39 +1051,67 @@ func _on_shot(e: Dictionary) -> void:
 	_tower_sound(tv, e.kind, a)
 	var b := _w(e.x2, e.y2, 0.6)
 	var c := _glow_of(e.color)
+	var aim := Vector3(b.x - a.x, 0.0, b.z - a.z)
 	match e.kind:
 		"bullet":
-			fx.burst(a, 3, 2.0, Color(1, 0.8, 0.45), 0.05, 0.08)
+			fx.muzzle(a, aim, Color(1, 0.78, 0.4), 1.0 if tv == null or tv.tower.type != "Machine Gun" else 0.8, randf() < 0.5)
 			if tv != null and tv.tower.type in ["Machine Gun", "Gun"]:
 				var side := Vector3(randf_range(-1, 1), 2.5, randf_range(-1, 1))
 				fx.emit("casing", a - Vector3(0, 0.2, 0), side, 2.5, 1.0, Color.WHITE, 12.0)
 		"hitscan":
 			fx.emit("casing", a - Vector3(0, 0.2, 0), Vector3(randf_range(-1, 1), 3.0, randf_range(-1, 1)), 3.0, 1.6, Color.WHITE, 12.0)
 			fx.ribbon(a, b, 0.05, Color(1, 0.95, 0.75), 0.12)
-			fx.burst(a, 6, 3.0, Color(1, 0.85, 0.5), 0.06, 0.12)
-			fx.burst(b, 6, 3.0, Color(1, 0.85, 0.5), 0.06, 0.25)
+			fx.ribbon(a, b, 0.16, Color(1, 0.7, 0.35, 0.35), 0.18)
+			fx.muzzle(a, aim, Color(1, 0.85, 0.5), 1.4)
+			fx.burst(b, 8, 4.0, Color(1, 0.85, 0.5), 0.04, 0.3)
+			fx.emit("puff", b, Vector3(0, 0.5, 0), 0.5, 0.12, Color(0.6, 0.58, 0.55, 0.4), 0.0, 1.0, 1.5)
 		"beam":
-			fx.ribbon(a, b, 0.12, c.lerp(Color(1, 0.3, 0.25), 0.5), 0.07)
-			fx.ribbon(a, b, 0.04, Color(1, 0.95, 0.9), 0.06)
-			if randf() < 0.3:
-				fx.burst(b, 2, 1.5, c, 0.05, 0.2)
+			var bc := c.lerp(Color(1, 0.3, 0.25), 0.5)
+			var wob := randf_range(0.8, 1.25)
+			fx.ribbon(a, b, 0.24 * wob, Color(bc.r, bc.g, bc.b, 0.3), 0.08)
+			fx.ribbon(a, b, 0.11 * wob, bc, 0.07)
+			fx.ribbon(a, b, 0.035, Color(1, 0.95, 0.9), 0.06)
+			fx.emit("spark", a, Vector3.ZERO, 0.07, 0.12, Color(bc.r, bc.g, bc.b, 0.9))
+			fx.emit("spark", b, Vector3.ZERO, 0.08, 0.16, Color(1, 0.85, 0.7, 0.9))
+			if randf() < 0.5:
+				fx.burst(b, 3, 3.0, bc, 0.03, 0.35)
+			if randf() < 0.25:
+				fx.emit("puff", b, Vector3(0, 0.8, 0), 0.6, 0.08, Color(0.4, 0.4, 0.42, 0.35), 0.0, 1.0, 2.0)
+				fx.flash(b + Vector3(0, 0.3, 0), bc, 1.2, 2.5, 0.12)
 		"pierce":
+			fx.ribbon(a, b, 0.4, Color(0.6, 0.4, 1.0, 0.35), 0.3)
 			fx.ribbon(a, b, 0.22, Color(0.75, 0.55, 1.0), 0.25)
 			fx.ribbon(a, b, 0.07, Color(1, 1, 1), 0.18)
+			fx.muzzle(a, aim, Color(0.75, 0.55, 1.0), 1.3)
+			for i in 6:
+				var pp := a.lerp(b, randf())
+				fx.emit("spark", pp, Vector3(randf_range(-1, 1), randf_range(0, 1.5), randf_range(-1, 1)), 0.4, 0.04, Color(0.8, 0.6, 1.0), 0.0, 2.0)
 		"cone":
 			var dir := (b - a)
-			for i in 6:
-				var v := dir.normalized() * randf_range(5.0, 9.0) + Vector3(randf_range(-1, 1), randf_range(0.0, 1.2), randf_range(-1, 1)) * 1.6
-				fx.emit("spark", a, v, randf_range(0.25, 0.45), randf_range(0.12, 0.22), Color(1.0, randf_range(0.35, 0.6), 0.15), -1.5, 1.5, 1.2)
-			if randf() < 0.3:
-				fx.smoke(a + (b - a) * 0.6, 1, Color(0.3, 0.3, 0.32, 0.4), 0.3, 1.0, 1.2)
+			if tv != null and tv.tower.type == "Freezer":
+				for i in 5:
+					var vf := dir.normalized() * randf_range(4.0, 7.0) + Vector3(randf_range(-1, 1), randf_range(-0.2, 0.6), randf_range(-1, 1)) * 1.2
+					fx.emit("puff", a, vf, randf_range(0.4, 0.7), randf_range(0.08, 0.14), Color(0.75, 0.9, 1.0, 0.55), -0.5, 2.5, 2.2)
+					fx.emit("spark", a, vf * 1.1, randf_range(0.3, 0.5), 0.03, Color(0.6, 0.9, 1.0), 2.0, 1.5)
+			else:
+				# a rolling tongue of flame: hot puffs that cool to smoke, plus streaking embers
+				for i in 3:
+					var v := dir.normalized() * randf_range(5.0, 9.0) + Vector3(randf_range(-1, 1), randf_range(0.0, 1.2), randf_range(-1, 1)) * 1.4
+					fx.emit("puff", a, v, randf_range(0.3, 0.5), randf_range(0.08, 0.13), Color(0.42, 0.4, 0.4, 0.45), -2.0, 2.0, 2.4, 1.7)
+				for i in 2:
+					var v2 := dir.normalized() * randf_range(6.0, 10.0) + Vector3(randf_range(-1, 1), randf_range(0.2, 1.5), randf_range(-1, 1))
+					fx.emit("spark", a, v2, randf_range(0.3, 0.6), 0.035, Color(1.0, randf_range(0.4, 0.65), 0.15), 3.0, 1.0)
+				if randf() < 0.2:
+					fx.flash(a + dir.normalized() * 1.5, Color(1.0, 0.55, 0.2), 2.0, 4.0, 0.15)
 		"lob", "puddle":
-			fx.smoke(a, 3, Color(0.6, 0.6, 0.62, 0.5), 0.18, 0.7, 0.6)
-			fx.burst(a, 4, 2.0, Color(1, 0.7, 0.35), 0.07, 0.12)
+			fx.muzzle(a, Vector3(aim.x, aim.length(), aim.z), Color(1, 0.7, 0.35), 1.6)
+			fx.smoke(a, 4, Color(0.6, 0.6, 0.62, 0.5), 0.2, 0.9, 0.8)
 		"homing":
-			fx.smoke(a, 2, Color(0.7, 0.7, 0.72, 0.5), 0.15, 0.6, 0.3)
+			fx.smoke(a, 3, Color(0.7, 0.7, 0.72, 0.5), 0.18, 0.8, 0.3)
+			fx.flash(a, Color(1, 0.6, 0.3), 1.2, 2.5, 0.12)
 		"virus":
 			fx.ribbon(a, b, 0.06, Color(0.6, 1.0, 0.4), 0.2, true, 3)
+			fx.ribbon(a, b, 0.16, Color(0.5, 1.0, 0.3, 0.3), 0.25, true, 3)
 			fx.burst(b, 6, 1.5, Color(0.6, 1.0, 0.4), 0.07, 0.4, "glob", 1.0)
 		"unit_rifles", "unit_commando":
 			fx.burst(a, 2, 1.5, Color(1, 0.85, 0.5), 0.04, 0.06)
@@ -1305,13 +1358,19 @@ func _sync_projectiles() -> void:
 		var pos := _w(x, y, lift)
 		var prev: Vector3 = m.position
 		m.position = pos
+		var dt := maxf(get_process_delta_time(), 1e-3)
+		var vel := (pos - prev) / dt if prev != Vector3.ZERO else Vector3.ZERO
 		if p.kind == "homing" and prev.distance_squared_to(pos) > 1e-6:
 			m.look_at(pos + (pos - prev), Vector3.UP)
 			m.rotate_object_local(Vector3.RIGHT, -PI / 2.0)
-			if randf() < 0.5:
-				fx.emit("puff", pos, Vector3(0, 0.4, 0), 0.6, 0.12, Color(0.75, 0.75, 0.78, 0.45), 0.0, 1.0, 1.5)
-		elif p.kind == "bullet" and randf() < 0.25:
-			fx.ribbon(prev, pos, 0.03, Color(1, 0.8, 0.45, 0.6), 0.05)
+			fx.rocket_trail(pos - (pos - prev).normalized() * 0.25, vel)
+		elif p.kind == "bullet" and prev != Vector3.ZERO:
+			fx.emit("spark", pos, vel * 0.5, 0.04, 0.035, Color(1, 0.8, 0.45, 0.8))
+		elif (p.kind == "lob" or p.kind == "acid") and prev != Vector3.ZERO and randf() < 0.6:
+			var tc := Color(0.55, 0.55, 0.58, 0.35) if p.kind == "lob" else Color(0.45, 0.8, 0.3, 0.35)
+			fx.emit("puff", pos, Vector3(0, 0.2, 0), 0.7, 0.07, tc, 0.0, 1.0, 1.8)
+			if p.kind == "lob":
+				fx.emit("spark", pos, -vel * 0.15, 0.05, 0.05, Color(1, 0.6, 0.25))
 	if proj_views.size() > seen.size():
 		for id in proj_views.keys():
 			if not seen.has(id):
@@ -2167,6 +2226,7 @@ func _input(ev: InputEvent) -> void:
 	if ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_MIDDLE:
 		if ev.pressed and not hud.has_modal():
 			pan_drag = true
+			orbit_drag = false
 			pan_moved = 0.0
 			cam_rig.spectator = false
 		elif not ev.pressed:
@@ -2178,8 +2238,12 @@ func _input(ev: InputEvent) -> void:
 		if pan_drag and ev.button_mask & (MOUSE_BUTTON_MASK_MIDDLE | MOUSE_BUTTON_MASK_RIGHT) == 0:
 			pan_drag = false  # the release landed on a HUD control
 		if pan_drag:
-			cam_rig.pan(ev.relative)
 			pan_moved += ev.relative.length()
+			if orbit_drag and not Input.is_key_pressed(KEY_SHIFT):
+				if pan_moved >= 6.0:
+					cam_rig.orbit(ev.relative)
+			else:
+				cam_rig.pan(ev.relative)
 
 
 func _unhandled_input(ev: InputEvent) -> void:
@@ -2201,9 +2265,11 @@ func _unhandled_input(ev: InputEvent) -> void:
 			MOUSE_BUTTON_RIGHT:
 				if ev.pressed:
 					pan_drag = true
+					orbit_drag = true
 					pan_moved = 0.0
 				else:
 					pan_drag = false
+					orbit_drag = false
 					if pan_moved < 6.0:
 						_cancel()
 			MOUSE_BUTTON_LEFT:
@@ -2414,6 +2480,10 @@ func _key(k: Key) -> void:
 			cam_rig.rotate_step(1)
 		KEY_HOME:
 			cam_rig.recentre()
+		KEY_PAGEUP:
+			cam_rig.tilt_step(1)
+		KEY_PAGEDOWN:
+			cam_rig.tilt_step(-1)
 		KEY_V:
 			cam_rig.spectator = not cam_rig.spectator
 			hud.toast("Spectator camera " + ("on" if cam_rig.spectator else "off"), Color(0.8, 0.85, 1.0), 1.2)
