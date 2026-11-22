@@ -530,6 +530,12 @@ func _process(delta: float) -> void:
 		alpha = clampf(acc / Bal.DT, 0.0, 1.0)
 	else:
 		_handle_events(g.drain_events())
+	# Retry/Restart restores a fresh Board and Economy: rebind the views to them, or the old
+	# board's roads stay on screen and new roads and town spurs never appear.
+	if terrain.board != g.board or eco_view.eco != g.eco:
+		terrain.extra_kind = g.eco.ground_kind
+		terrain.setup(g.board)
+		last_road_version = -1
 	if g.board.version != last_road_version or g.eco.ground_version != last_ground_version:
 		last_road_version = g.board.version
 		last_ground_version = g.eco.ground_version
