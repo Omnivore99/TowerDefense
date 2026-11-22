@@ -29,6 +29,11 @@ var dent := 0.0
 var built_suit := ""
 var soft := false
 var coil := false
+var rig: MonsterRig  ## rigged model from assets/monsters, or null for the code-built fallback
+var deco: Node3D  ## where crests and crowns hang: a bone of the rig, or the body
+var last_flash := 0.0
+var dying_t := -1.0
+var death_len := 0.0
 
 
 func setup(en: SimEnemy, tv: TerrainView) -> void:
@@ -58,92 +63,106 @@ func _build() -> void:
 		gc = bc.lightened(0.3)
 	mat = Kit.jelly_material(bc, gc)
 	var dark := Kit.std("enemy_dark", Color(0.06, 0.06, 0.08), 0.3, 0.4)
-	match e.arch:
-		"hopper", "crawler", "blob":
-			var sq := 0.85 if e.arch == "crawler" else 1.0
-			var m := Kit.add(body, Kit.sphere(1.0, 18), mat, Vector3(0, r * sq, 0), Vector3.ZERO, Vector3(r, r * sq, r))
-			if e.arch == "blob":
-				m.scale = Vector3(r * 1.15, r * 0.8, r * 1.15)
-				m.position.y = r * 0.8
-			if e.arch == "crawler":
-				for i in 3:
-					Kit.add(body, Kit.sphere(1.0, 10), mat, Vector3(-r * (0.6 + i * 0.45), r * 0.45, 0), Vector3.ZERO, Vector3.ONE * r * (0.55 - i * 0.12))
-			_eyes(Vector3(r * 0.72, r * 1.05 * sq, 0), r)
-		"slinky":
-			for i in 7:
-				var ring := Kit.add(body, Kit.torus(0.62, 1.0, 16), mat, Vector3(-i * r * 0.32, r * 0.75, 0), Vector3(0, 0, PI / 2), Vector3.ONE * r * 0.75)
-				parts.append(ring)
-			_eyes(Vector3(r * 0.4, r * 1.0, 0), r * 0.8)
-		"roller":
-			var ball := Kit.add(body, Kit.sphere(1.0, 16), mat, Vector3(0, r, 0), Vector3.ZERO, Vector3.ONE * r)
-			parts.append(ball)
-			Kit.add(ball, Kit.torus(0.92, 1.06, 18), dark, Vector3.ZERO, Vector3(PI / 2, 0, 0))
-			Kit.add(ball, Kit.torus(0.92, 1.06, 18), dark, Vector3.ZERO, Vector3(0, 0, 0))
-			_eyes(Vector3(r * 0.85, r * 1.2, 0), r * 0.7)
-		"swinger":
-			Kit.add(body, Kit.sphere(1.0, 14), mat, Vector3(0, r * 1.2, 0), Vector3.ZERO, Vector3(r * 0.7, r * 0.9, r * 0.7))
-			for z in [-1, 1]:
-				var arm := Node3D.new()
-				body.add_child(arm)
-				arm.position = Vector3(0, r * 1.5, z * r * 0.75)
-				Kit.add(arm, Kit.cylinder(r * 0.12, r * 0.1, r * 1.1, 8), mat, Vector3(0, -r * 0.5, 0))
-				Kit.add(arm, Kit.sphere(r * 0.22, 8), mat, Vector3(0, -r * 1.05, 0))
-				parts.append(arm)
-			for z in [-1, 1]:
-				Kit.add(body, Kit.cylinder(r * 0.13, r * 0.1, r * 0.6, 8), mat, Vector3(0, r * 0.3, z * r * 0.3))
-			_eyes(Vector3(r * 0.55, r * 1.45, 0), r * 0.7)
-		"tumbler":
-			var cube := Kit.add(body, Kit.bevel_box(Vector3.ONE * 1.4, 0.25), mat, Vector3(0, r, 0), Vector3.ZERO, Vector3.ONE * r)
-			parts.append(cube)
-			_eyes(Vector3(r * 0.72, r * 1.15, 0), r * 0.75)
-		"beetle":
-			Kit.add(body, Kit.sphere(1.0, 16, true), mat, Vector3(0, r * 0.25, 0), Vector3.ZERO, Vector3(r * 1.2, r * 1.1, r))
-			Kit.add(body, Kit.torus(0.95, 1.05, 16), dark, Vector3(0, r * 0.25, 0), Vector3.ZERO, Vector3(r * 1.2, r, r))
-			Kit.add(body, Kit.box(Vector3(2.2, 0.06, 0.08)), dark, Vector3(0, r * 0.9, 0), Vector3.ZERO, Vector3(r, r, r))
-			for i in 3:
+	var glowing := e.tier >= 3 or e.champion or e.boss
+	rig = null
+	if MonsterRig.has_model(e.arch):
+		rig = MonsterRig.make(e.arch, {
+			"body": mat, "dark": dark,
+			"eye": Kit.glow(Color(1, 0.85, 0.5), 2.5) if glowing else Kit.std("eye_white", Color(0.95, 0.95, 0.92), 0.0, 0.2),
+			"pupil": Kit.glow(Color(1, 0.2, 0.1), 3.0) if glowing else Kit.std("eye_pupil", Color(0.03, 0.03, 0.05), 0.0, 0.1),
+		})
+	if rig != null:
+		body.add_child(rig)
+		rig.scale = Vector3.ONE * r
+		deco = rig.attach_point(r)
+	else:
+		deco = body
+		match e.arch:
+			"hopper", "crawler", "blob":
+				var sq := 0.85 if e.arch == "crawler" else 1.0
+				var m := Kit.add(body, Kit.sphere(1.0, 18), mat, Vector3(0, r * sq, 0), Vector3.ZERO, Vector3(r, r * sq, r))
+				if e.arch == "blob":
+					m.scale = Vector3(r * 1.15, r * 0.8, r * 1.15)
+					m.position.y = r * 0.8
+				if e.arch == "crawler":
+					for i in 3:
+						Kit.add(body, Kit.sphere(1.0, 10), mat, Vector3(-r * (0.6 + i * 0.45), r * 0.45, 0), Vector3.ZERO, Vector3.ONE * r * (0.55 - i * 0.12))
+				_eyes(Vector3(r * 0.72, r * 1.05 * sq, 0), r)
+			"slinky":
+				for i in 7:
+					var ring := Kit.add(body, Kit.torus(0.62, 1.0, 16), mat, Vector3(-i * r * 0.32, r * 0.75, 0), Vector3(0, 0, PI / 2), Vector3.ONE * r * 0.75)
+					parts.append(ring)
+				_eyes(Vector3(r * 0.4, r * 1.0, 0), r * 0.8)
+			"roller":
+				var ball := Kit.add(body, Kit.sphere(1.0, 16), mat, Vector3(0, r, 0), Vector3.ZERO, Vector3.ONE * r)
+				parts.append(ball)
+				Kit.add(ball, Kit.torus(0.92, 1.06, 18), dark, Vector3.ZERO, Vector3(PI / 2, 0, 0))
+				Kit.add(ball, Kit.torus(0.92, 1.06, 18), dark, Vector3.ZERO, Vector3(0, 0, 0))
+				_eyes(Vector3(r * 0.85, r * 1.2, 0), r * 0.7)
+			"swinger":
+				Kit.add(body, Kit.sphere(1.0, 14), mat, Vector3(0, r * 1.2, 0), Vector3.ZERO, Vector3(r * 0.7, r * 0.9, r * 0.7))
 				for z in [-1, 1]:
-					var leg := Kit.add(body, Kit.cylinder(r * 0.06, r * 0.05, r * 0.7, 6), dark, Vector3((i - 1) * r * 0.6, r * 0.2, z * r * 1.0), Vector3(z * 0.9, 0, 0))
-					parts.append(leg)
-			_eyes(Vector3(r * 1.15, r * 0.5, 0), r * 0.6)
-		"nautilus":
-			Kit.add(body, Kit.sphere(1.0, 12), mat, Vector3(r * 0.5, r * 0.35, 0), Vector3.ZERO, Vector3(r * 0.9, r * 0.4, r * 0.55))
-			var shell := Node3D.new()
-			body.add_child(shell)
-			shell.position = Vector3(-r * 0.1, r * 0.95, 0)
-			for i in 5:
-				var s := r * (0.85 - i * 0.15)
-				Kit.add(shell, Kit.torus(s * 0.45, s, 16), mat, Vector3(-i * r * 0.08, i * r * 0.05, 0), Vector3(PI / 2, 0, 0))
-			_eyes(Vector3(r * 1.25, r * 0.6, 0), r * 0.55)
-		"balloon":
-			var b := Kit.add(body, Kit.sphere(1.0, 16), mat, Vector3(0, 3.2 + r, 0), Vector3.ZERO, Vector3(r, r * 1.15, r))
-			parts.append(b)
-			Kit.add(body, Kit.cylinder(0.015, 0.015, 3.0, 4, false), dark, Vector3(0, 1.7, 0))
-			Kit.add(body, Kit.box(Vector3(0.3, 0.2, 0.3)), Kit.wood(), Vector3(0, 0.2, 0))
-			_eyes(Vector3(r * 0.85, 3.2 + r * 1.2, 0), r * 0.7)
-		"walker":
-			Kit.add(body, Kit.sphere(1.0, 16), mat, Vector3(0, r * 2.3, 0), Vector3.ZERO, Vector3(r * 0.9, r * 0.75, r * 0.8))
-			for z in [-1, 1]:
-				var leg2 := Node3D.new()
-				body.add_child(leg2)
-				leg2.position = Vector3(0, r * 1.8, z * r * 0.45)
-				Kit.add(leg2, Kit.cylinder(r * 0.16, r * 0.12, r * 1.8, 8), mat, Vector3(0, -r * 0.9, 0))
-				Kit.add(leg2, Kit.bevel_box(Vector3(0.5, 0.15, 0.3), 0.05), dark, Vector3(r * 0.1, -r * 1.8, 0), Vector3.ZERO, Vector3.ONE * r)
-				parts.append(leg2)
-			_eyes(Vector3(r * 0.8, r * 2.45, 0), r * 0.7)
-		_:
-			Kit.add(body, Kit.sphere(1.0, 14), mat, Vector3(0, r, 0), Vector3.ZERO, Vector3.ONE * r)
-			_eyes(Vector3(r * 0.8, r * 1.1, 0), r)
+					var arm := Node3D.new()
+					body.add_child(arm)
+					arm.position = Vector3(0, r * 1.5, z * r * 0.75)
+					Kit.add(arm, Kit.cylinder(r * 0.12, r * 0.1, r * 1.1, 8), mat, Vector3(0, -r * 0.5, 0))
+					Kit.add(arm, Kit.sphere(r * 0.22, 8), mat, Vector3(0, -r * 1.05, 0))
+					parts.append(arm)
+				for z in [-1, 1]:
+					Kit.add(body, Kit.cylinder(r * 0.13, r * 0.1, r * 0.6, 8), mat, Vector3(0, r * 0.3, z * r * 0.3))
+				_eyes(Vector3(r * 0.55, r * 1.45, 0), r * 0.7)
+			"tumbler":
+				var cube := Kit.add(body, Kit.bevel_box(Vector3.ONE * 1.4, 0.25), mat, Vector3(0, r, 0), Vector3.ZERO, Vector3.ONE * r)
+				parts.append(cube)
+				_eyes(Vector3(r * 0.72, r * 1.15, 0), r * 0.75)
+			"beetle":
+				Kit.add(body, Kit.sphere(1.0, 16, true), mat, Vector3(0, r * 0.25, 0), Vector3.ZERO, Vector3(r * 1.2, r * 1.1, r))
+				Kit.add(body, Kit.torus(0.95, 1.05, 16), dark, Vector3(0, r * 0.25, 0), Vector3.ZERO, Vector3(r * 1.2, r, r))
+				Kit.add(body, Kit.box(Vector3(2.2, 0.06, 0.08)), dark, Vector3(0, r * 0.9, 0), Vector3.ZERO, Vector3(r, r, r))
+				for i in 3:
+					for z in [-1, 1]:
+						var leg := Kit.add(body, Kit.cylinder(r * 0.06, r * 0.05, r * 0.7, 6), dark, Vector3((i - 1) * r * 0.6, r * 0.2, z * r * 1.0), Vector3(z * 0.9, 0, 0))
+						parts.append(leg)
+				_eyes(Vector3(r * 1.15, r * 0.5, 0), r * 0.6)
+			"nautilus":
+				Kit.add(body, Kit.sphere(1.0, 12), mat, Vector3(r * 0.5, r * 0.35, 0), Vector3.ZERO, Vector3(r * 0.9, r * 0.4, r * 0.55))
+				var shell := Node3D.new()
+				body.add_child(shell)
+				shell.position = Vector3(-r * 0.1, r * 0.95, 0)
+				for i in 5:
+					var s := r * (0.85 - i * 0.15)
+					Kit.add(shell, Kit.torus(s * 0.45, s, 16), mat, Vector3(-i * r * 0.08, i * r * 0.05, 0), Vector3(PI / 2, 0, 0))
+				_eyes(Vector3(r * 1.25, r * 0.6, 0), r * 0.55)
+			"balloon":
+				var b := Kit.add(body, Kit.sphere(1.0, 16), mat, Vector3(0, 3.2 + r, 0), Vector3.ZERO, Vector3(r, r * 1.15, r))
+				parts.append(b)
+				Kit.add(body, Kit.cylinder(0.015, 0.015, 3.0, 4, false), dark, Vector3(0, 1.7, 0))
+				Kit.add(body, Kit.box(Vector3(0.3, 0.2, 0.3)), Kit.wood(), Vector3(0, 0.2, 0))
+				_eyes(Vector3(r * 0.85, 3.2 + r * 1.2, 0), r * 0.7)
+			"walker":
+				Kit.add(body, Kit.sphere(1.0, 16), mat, Vector3(0, r * 2.3, 0), Vector3.ZERO, Vector3(r * 0.9, r * 0.75, r * 0.8))
+				for z in [-1, 1]:
+					var leg2 := Node3D.new()
+					body.add_child(leg2)
+					leg2.position = Vector3(0, r * 1.8, z * r * 0.45)
+					Kit.add(leg2, Kit.cylinder(r * 0.16, r * 0.12, r * 1.8, 8), mat, Vector3(0, -r * 0.9, 0))
+					Kit.add(leg2, Kit.bevel_box(Vector3(0.5, 0.15, 0.3), 0.05), dark, Vector3(r * 0.1, -r * 1.8, 0), Vector3.ZERO, Vector3.ONE * r)
+					parts.append(leg2)
+				_eyes(Vector3(r * 0.8, r * 2.45, 0), r * 0.7)
+			_:
+				Kit.add(body, Kit.sphere(1.0, 14), mat, Vector3(0, r, 0), Vector3.ZERO, Vector3.ONE * r)
+				_eyes(Vector3(r * 0.8, r * 1.1, 0), r)
 	# tiers add spikes and crests; champions and bosses get crowns
 	if e.tier >= 2 and e.arch != "balloon":
 		for i in e.tier:
-			Kit.add(body, Kit.cone(r * 0.12, r * 0.4, 6), dark, Vector3(-r * 0.3 + i * r * 0.22, r * (1.9 if e.arch in ["swinger", "walker"] else 1.6), 0), Vector3(0, 0, -0.3))
+			Kit.add(deco, Kit.cone(r * 0.12, r * 0.4, 6), dark, Vector3(-r * 0.3 + i * r * 0.22, r * (1.9 if e.arch in ["swinger", "walker"] else 1.6), 0), Vector3(0, 0, -0.3))
 	if e.champion or e.boss:
 		var crown_y := r * (2.9 if e.arch == "walker" else 2.0)
-		Kit.add(body, Kit.torus(r * 0.3, r * 0.42, 12), Kit.brass(), Vector3(0, crown_y, 0))
+		Kit.add(deco, Kit.torus(r * 0.3, r * 0.42, 12), Kit.brass(), Vector3(0, crown_y, 0))
 		for i in 5:
 			var a := TAU * i / 5.0
-			Kit.add(body, Kit.cone(r * 0.07, r * 0.25, 5), Kit.brass(), Vector3(cos(a) * r * 0.36, crown_y + r * 0.13, sin(a) * r * 0.36))
-		Kit.add(body, Kit.sphere(r * 0.08, 8), Kit.glow(Color(1, 0.3, 0.2), 4.0), Vector3(r * 0.4, crown_y + 0.05, 0))
+			Kit.add(deco, Kit.cone(r * 0.07, r * 0.25, 5), Kit.brass(), Vector3(cos(a) * r * 0.36, crown_y + r * 0.13, sin(a) * r * 0.36))
+		Kit.add(deco, Kit.sphere(r * 0.08, 8), Kit.glow(Color(1, 0.3, 0.2), 4.0), Vector3(r * 0.4, crown_y + 0.05, 0))
 	if e.golden:
 		Kit.add(body, Kit.torus(r * 1.1, r * 1.2, 20), Kit.glow(Color(1, 0.85, 0.3), 3.0), Vector3(0, 0.05, 0))
 	# health bar (billboard)
@@ -196,6 +215,63 @@ func hit() -> void:
 	dent = 1.0
 
 
+## Gait phase (0..1) for the rig's move cycle; mirrors the timings of the code-built motion.
+func _pose_rig(delta: float) -> void:
+	var ph := 0.0
+	match e.arch:
+		"hopper", "slinky", "crawler", "blob":
+			ph = e.gait
+		"tumbler":
+			ph = fmod(e.anim_t, Bal.ARCH.tumblerFlip) / Bal.ARCH.tumblerFlip
+		"swinger":
+			ph = e.anim_t * 6.0 / TAU
+		"walker":
+			ph = e.anim_t * 3.0 / TAU
+		"beetle":
+			ph = e.anim_t * 14.0 / (3.0 * TAU)
+		"roller":
+			ph = e.anim_t
+			roll += e.speed * e.slow_mult * delta / maxf(0.2, r)
+		_:
+			ph = e.anim_t * 0.8
+	rig.pose(ph, delta, roll)
+
+
+## Plays the death animation in place, then dissolves. Returns false when there is no rig
+## (the caller frees the view straight away, as before).
+func die() -> bool:
+	if rig == null:
+		return false
+	death_len = rig.die()
+	if death_len <= 0.0:
+		return false
+	dying_t = 0.0
+	hp_back.visible = false
+	hp_fill.visible = false
+	if shield_mesh != null:
+		shield_mesh.visible = false
+	mat.set_shader_parameter("wobble", 0.0)
+	mat.set_shader_parameter("lag", 0.0)
+	mat.set_shader_parameter("flash", 1.0)
+	set_process(true)
+	return true
+
+
+func _process(delta: float) -> void:
+	if dying_t < 0.0:
+		set_process(false)
+		return
+	dying_t += delta
+	rig.pose(0.0, delta)
+	t += delta
+	mat.set_shader_parameter("t", t)
+	mat.set_shader_parameter("flash", maxf(0.0, 1.0 - dying_t * 8.0))
+	var fade := clampf((dying_t - death_len * 0.6) / (death_len * 0.6), 0.0, 1.0)
+	mat.set_shader_parameter("dissolve", fade)
+	if dying_t > death_len * 1.2:
+		queue_free()
+
+
 ## alpha: interpolation between the previous and current sim step.
 func sync(alpha: float, delta: float) -> void:
 	t += delta
@@ -215,7 +291,19 @@ func sync(alpha: float, delta: float) -> void:
 	var sy := 1.0
 	var lift := 0.0
 	var lag := 0.0
-	match e.arch:
+	if e.hit_flash > last_flash + 0.001:
+		if rig != null:
+			rig.hit()
+		else:
+			dent = 1.0
+	last_flash = e.hit_flash
+	if rig != null:
+		_pose_rig(delta)
+		if e.arch == "balloon":
+			lift = sin(e.anim_t * 1.3) * 0.25
+		lag = 0.08 if soft else 0.0
+	# code-built fallback bodies animate their parts here; rigged models skip this
+	match "" if rig != null else e.arch:
 		"hopper":
 			var g := e.gait
 			var air: float = Bal.ARCH.hopperAir
@@ -272,7 +360,7 @@ func sync(alpha: float, delta: float) -> void:
 				parts[i].rotation.y = sin(e.anim_t * 14.0 + i) * 0.4
 		"balloon":
 			lift = sin(e.anim_t * 1.3) * 0.25
-	if dent > 0.0:
+	if dent > 0.0 and rig == null:
 		dent = maxf(0.0, dent - delta * 7.0)
 		sx *= 1.0 + 0.12 * dent
 		sy *= 1.0 - 0.15 * dent

@@ -1104,7 +1104,8 @@ func _on_kill(e: Dictionary) -> void:
 		cam_rig.add_shake(0.25)
 	var ev: EnemyView = enemy_views.get(e.id)
 	if ev != null:
-		ev.queue_free()
+		if not ev.die():
+			ev.queue_free()
 		enemy_views.erase(e.id)
 
 
