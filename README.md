@@ -1,39 +1,51 @@
-# Satisfying TD v1.0
+# Satisfying TD
 
-Browser tower defense: towers are built Tetris-style from falling pieces, the base grows along a golden spiral of Fibonacci squares.
+A tower defense game where you build towers from falling Tetris-style pieces. Every shape,
+colour and story you stack changes how a tower fights.
 
-## Run
+- **v2.0 (3D, Godot 4.7)** lives in [`game/`](game/). Play it in the browser at
+  https://omnivore99.github.io/TowerDefense/ once `main` deploys.
+- **v1.1 (2D, TypeScript + Canvas)** lives in [`legacy-web/`](legacy-web/) and stays playable at
+  https://omnivore99.github.io/TowerDefense/v1/.
 
+## Running v2.0
+
+1. Install [Godot 4.7](https://godotengine.org/download) (standard build, not .NET).
+2. Open `game/project.godot` in the editor and press F5, or run `godot --path game`.
+
+Controls: left click places the piece in hand or selects a tower, right-drag or WASD pans,
+the wheel zooms, Q / E turn the camera, Home recentres. R rotates the piece, F mirrors it,
+H puts it on hold, Space or Enter calls the next wave, Esc undoes a placement within 2 seconds.
+1 2 3 pick MUST USE pieces, 4 to 7 pick MAY USE pieces, [ and ] change speed, P pauses.
+
+## Tools
+
+All of these run without a window:
+
+```sh
+godot --headless --path game -- --tests                       # unit + determinism tests
+godot --headless --path game -- --bots --seeds 8 --jobs 4     # balance bots (all skills)
+godot --headless --path game -- --bots --skill average --seeds 4 --mode normal --json
 ```
-npm install
-npm run dev        # dev server
-npm run build      # typecheck + single-file build to dist/index.html (runs from file:// or any static host)
-npm run bots       # headless balance harness (options: --seeds 8 --mode normal --skill novice,average,expert --json)
-```
 
-Open `dist/index.html?bots=1` (optionally `&seeds=3&mode=golden`) to run the harness in a browser.
+Bot reports print a table per board (clear rate, base HP lost, time in danger) and with
+`--json` write `reports/bots-<skill>-<mode>.json`.
+
+Demo and screenshots (needs a display or `xvfb-run`):
+
+```sh
+godot --path game -- --demo --warp 2,3,8 --shot shot.png      # expert bot, board 2 wave 3
+```
 
 ## Layout
 
-- `src/balance.ts` – every tunable number (H_b, tower stats, odds, timings, costs).
-- `src/sim/` – pure, deterministic logic at 60 Hz: `map.ts` (terrain, ore, spiral-guided roadway, seals), `pieces.ts`, `towers.ts` (recipes, shape bonuses, stats), `waves.ts`, `base.ts`, `game.ts` (state machine, placement, combat).
-- `src/render/` – PixiJS v8 renderer (2.5D towers, enemies, effects, ghost, camera).
-- `src/audio/` – procedural Web Audio, pentatonic.
-- `src/ui/` – DOM HUD, menus, base screen, input (mouse, keyboard, touch).
-- `src/bots/` – novice / average / expert bots and the harness.
-- `src/save.ts` – localStorage run, settings, playtest metrics.
-
-## Controls
-
-Drag or click a piece, then click the board. R / wheel / right-click rotate, F mirror, Space drop, H hold, Esc cancel,
-B recipe book, P pause, Enter ready, Ctrl+wheel or +/- zoom, WASD / arrows pan when zoomed. Touch: drag to place, two-finger tap rotates.
-
-## Interpretation notes
-
-Where the build prompt left room, these choices were made (all easy to change):
-
-- Wave arrivals go to MUST USE; the board-start grant and calm pieces fill the MAY USE tray first and overflow to MUST USE (so a 5-piece grant is 2 MUST + 3 MAY).
-- Hold swaps once per placement, as in Tetris. Recycling counts as a placement.
-- A story layer can be several pieces (that is how 13/8/5/3 Fibonacci Spires are possible); each layer must have fewer cells than the one below.
-- Archetypes unlock gradually: hoppers on board 1, slinky/roller from 2, swinger/tumbler from 3, nautilus and balloons from 4, giant walkers from 5.
-- Losing a board restores the base to its state at the start of that board and lets you retry.
+| Path | What |
+| --- | --- |
+| `game/balance/balance.gd` | Every tunable number (class `Bal`) |
+| `game/sim/` | Deterministic 60 Hz simulation, no rendering (pieces, board, waves, towers, game) |
+| `game/bots/` | Bot players and the balance harness |
+| `game/view/` | 3D world: procedural model kit, terrain, towers, monsters, FX, camera |
+| `game/ui/` | HUD and screens |
+| `game/tests/` | Tests, including bit-exact checks against v1.1's random streams |
+| `legacy-web/` | v1.1 |
+| `docs/references/` | Art direction pictures |

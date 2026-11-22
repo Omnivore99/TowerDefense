@@ -1,8 +1,9 @@
-name: Deploy to GitHub Pages
+name: Test and deploy to GitHub Pages
 
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -11,24 +12,96 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  GODOT_VERSION: 4.7.2
+  GODOT_URL: https://github.com/godotengine/godot/releases/download/4.7.2-stable
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # ---- v1.1 (legacy web build) -> /v1/
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npm run build
+          cache-dependency-path: legacy-web/package-lock.json
+      - name: Build v1.1
+        working-directory: legacy-web
+        run: |
+          npm ci
+          npm run build
+
+      # ---- v2.0 (Godot)
+      - name: Cache Godot
+        id: godot-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/godot
+          key: godot-${{ env.GODOT_VERSION }}
+      - name: Download Godot and export templates
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/godot
+          cd ~/godot
+          curl -sSLO "$GODOT_URL/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          curl -sSLO "$GODOT_URL/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          rm "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+      - name: Install Godot
+        run: |
+          sudo ln -sf ~/godot/Godot_v${GODOT_VERSION}-stable_linux.x86_64 /usr/local/bin/godot
+          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          unzip -qo ~/godot/Godot_v${GODOT_VERSION}-stable_export_templates.tpz -d /tmp/tpl
+          mv /tmp/tpl/templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
+      - name: Import project
+        run: godot --headless --path game --import || true
+      - name: Tests
+        run: godot --headless --path game -- --tests
+      - name: Bot smoke run (board results must not crash)
+        run: godot --headless --path game -- --bots --skill average --seeds 1 --mode normal --boards 2
+      - name: Export Web
+        run: |
+          mkdir -p game/build/web
+          godot --headless --path game --export-release "Web" build/web/index.html
+          test -f game/build/web/index.html
+      - name: Export desktop builds (Linux, Windows, macOS)
+        run: |
+          mkdir -p game/build/linux game/build/windows game/build/macos
+          godot --headless --path game --export-release "Linux" build/linux/SatisfyingTD.x86_64
+          godot --headless --path game --export-release "Windows" build/windows/SatisfyingTD.exe
+          godot --headless --path game --export-release "macOS" build/macos/SatisfyingTD.zip || echo "macOS export skipped"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SatisfyingTD-linux
+          path: game/build/linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SatisfyingTD-windows
+          path: game/build/windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SatisfyingTD-macos
+          path: game/build/macos
+          if-no-files-found: ignore
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site/v1
+          cp -r game/build/web/* _site/
+          cp -r legacy-web/dist/* _site/v1/
+          touch _site/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: _site
+
   deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:
